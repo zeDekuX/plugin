@@ -2,15 +2,17 @@
 
 Il testo scorre attorno a forme animate, come "Contorna con testo" di InDesign, ma dal vivo: a ogni frame le parole intere si ridispongono. Un blocco che nessuna forma tocca resta identico all'originale. È il port di `Cavalry/Text Area Deformer` e parte dal suo motore geometrico (`src/core.js`), a cui si aggiunge la compressione degli spazi del testo giustificato.
 
-Verificato su After Effects 2026 (26.5) su macOS. Le altre versioni non sono state provate.
+Verificato su After Effects 2026 (26.5) su macOS. Le altre versioni e Windows non sono stati provati.
 
 ## Installazione
 
-La cartella di AE richiede i permessi di amministratore:
+La cartella di AE richiede i permessi di amministratore. Su Mac:
 
 ```bash
 sudo cp "Text Wrap.jsx" "/Applications/Adobe After Effects 2026/Scripts/ScriptUI Panels/"
 ```
+
+Su Windows copia `Text Wrap.jsx` in `C:\Program Files\Adobe\Adobe After Effects 2026\Support Files\Scripts\ScriptUI Panels\`.
 
 Riavvia AE e apri **Finestra → Text Wrap.jsx**. Senza installare: **File → Script → Esegui file di script…**
 

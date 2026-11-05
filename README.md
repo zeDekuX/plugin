@@ -10,12 +10,14 @@ I miei plugin per le app creative. Una cartella per applicazione, una sottocarte
 
 # Mini guida: Text Wrap
 
-Il testo si ridispone da solo attorno alle forme, a ogni frame, come "Contorna con testo" di InDesign. Funziona su più blocchi di testo, che restano dove sono e identici all'originale finché una forma non li tocca. Provato su After Effects 2026 (26.5) su macOS.
+Il testo si ridispone da solo attorno alle forme, a ogni frame, come "Contorna con testo" di InDesign. Funziona su più blocchi di testo, che restano dove sono e identici all'originale finché una forma non li tocca. Provato su After Effects 2026 (26.5) su macOS. Su Windows non è ancora stato provato.
 
 ## Installa
 
 1. Scarica [Text Wrap.jsx](After%20Effects/Text%20Wrap/Text%20Wrap.jsx).
-2. Trascinalo in `Applicazioni/Adobe After Effects 2026/Scripts/ScriptUI Panels/`. Il Mac chiede la password.
+2. Copialo nella cartella dei pannelli. Il sistema chiede la conferma da amministratore.
+   - **Mac:** `Applicazioni/Adobe After Effects 2026/Scripts/ScriptUI Panels/`
+   - **Windows:** `C:\Program Files\Adobe\Adobe After Effects 2026\Support Files\Scripts\ScriptUI Panels\`
 3. Riavvia After Effects e apri **Finestra → Text Wrap.jsx**.
 
 Se AE propone di attivare il motore espressioni JavaScript, accetta: serve al plugin.
