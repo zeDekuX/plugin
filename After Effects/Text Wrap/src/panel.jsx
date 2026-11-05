@@ -6,10 +6,19 @@
     var POSITION = SCALE * 100;    // huge and amount = pixels / SCALE (range +/-100000 px).
     var PARKED = -90000;           // Y offset that takes hidden words out of any comp.
     var ANIM_MOVE = 'TW Posizione', ANIM_COUNT = 'TW Conteggio', ANIM_OLD_HIDE = 'TW Nascondi', CONTROL_TEXT = 'TW Testo';
+    var AUTO_AREA = 'TW Area - ', ORIGINAL_SUFFIX = ' (box originale)';
+    var STYLE_FIELDS = ['font', 'fontSize', 'tracking', 'leading', 'autoLeading', 'applyFill', 'fillColor', 'applyStroke', 'strokeWidth', 'strokeColor', 'strokeOverFill', 'fauxBold', 'fauxItalic', 'allCaps', 'smallCaps', 'horizontalScale', 'verticalScale', 'baselineShift', 'tsume', 'superscript', 'subscript'];
     var STALE = 'Testo cambiato: premi Applica / Aggiorna wrap';
     var BASED_ON_CHARACTERS = 1, BASED_ON_WORDS = 3;
     var EXPR = /*@@EXPR@@*/;
 
+    // While the panel applies several blocks, messages are collected and shown once.
+    var notices = null;
+    function notify(message) {
+        if (!notices) { alert(message); return; }
+        for (var i = 0; i < notices.length; i++) if (notices[i] === message) return;
+        notices.push(message);
+    }
     function textDoc(layer) { return layer.property('ADBE Text Properties').property('ADBE Text Document'); }
     function animators(layer) { return layer.property('ADBE Text Properties').property('ADBE Text Animators'); }
     function effects(layer) { return layer.property('ADBE Effect Parade'); }
@@ -29,30 +38,60 @@
     }
 
     /* ---- install state ---- */
-    function helperNames(layer) {
-        return { metrics: 'TW Metriche #' + layer.id, cache: 'TW Cache #' + layer.id, engine: 'TW Motore #' + layer.id };
-    }
+    function helperIds(id) { return { metrics: 'TW Metriche #' + id, cache: 'TW Cache #' + id, engine: 'TW Motore #' + id }; }
     function helper(comp, name) {
         for (var i = 1; i <= comp.numLayers; i++) if (comp.layer(i).name === name) return comp.layer(i);
         return null;
     }
-    function isInstalled(layer) { return !!helper(layer.containingComp, helperNames(layer).engine); }
-    function readConfig(layer) {
-        var engine = helper(layer.containingComp, helperNames(layer).engine), config = { area: [], exclusions: [] };
-        if (!engine) return config;
-        var parts = engine.comment.split('|');
-        function ids(s) { var out = [], v = s ? s.split(',') : []; for (var i = 0; i < v.length; i++) out.push(parseInt(v[i], 10)); return out; }
-        config.area = ids(parts[0]);
-        config.exclusions = ids(parts[1]);
-        return config;
+    function moveSelector(layer) {
+        var list = animators(layer);
+        for (var i = 1; i <= list.numProperties; i++) if (list.property(i).name === ANIM_MOVE) return list.property(i).property('ADBE Text Selectors').property(1);
+        return null;
     }
-    function savedLayers(comp, text) {
-        var config = readConfig(text), saved = { area: [], exclusions: [] };
-        for (var a = 0; a < config.area.length; a++) { var la = byId(comp, config.area[a]); if (la) saved.area.push(la); }
-        for (var x = 0; x < config.exclusions.length; x++) { var lx = byId(comp, config.exclusions[x]); if (lx) saved.exclusions.push(lx); }
+    // The id in the helper names the selector of this layer reads. It differs from
+    // layer.id on a duplicated layer, and on any layer of a duplicated comp.
+    function linkedId(layer) {
+        var selector = moveSelector(layer);
+        if (!selector) return null;
+        var found = selector.property('ADBE Text Expressible Amount').expression.match(/TW Motore #(\d+)/);
+        return found ? parseInt(found[1], 10) : null;
+    }
+    function controlTarget(comp, engine, name) {
+        var control = effects(engine).property(name), index = control ? control.property(1).value : 0;
+        return index > 0 && index <= comp.numLayers ? comp.layer(index) : null;
+    }
+    function helperNames(layer) {
+        var comp = layer.containingComp, linked = linkedId(layer);
+        if (linked !== null && linked !== layer.id) {
+            var engine = helper(comp, helperIds(linked).engine);
+            if (engine && controlTarget(comp, engine, CONTROL_TEXT) === layer) return helperIds(linked);
+        }
+        return helperIds(layer.id);
+    }
+    function isInstalled(layer) { return !!helper(layer.containingComp, helperNames(layer).engine); }
+    // Layer Controls keep following their layers when ids change with a comp copy.
+    function engineLayers(comp, engine) {
+        var saved = { area: [], exclusions: [] }, fx = effects(engine);
+        for (var i = 1; i <= fx.numProperties; i++) {
+            var name = fx.property(i).name, target = controlTarget(comp, engine, name);
+            if (!target) continue;
+            if (name.indexOf('TW Area ') === 0) saved.area.push(target);
+            else if (name.indexOf('TW Esclusione ') === 0) saved.exclusions.push(target);
+        }
         return saved;
     }
+    function savedLayers(comp, text) {
+        var engine = helper(comp, helperNames(text).engine);
+        return engine ? engineLayers(comp, engine) : { area: [], exclusions: [] };
+    }
+    // Written by install: area ids | exclusion ids | justification | original box id.
+    function restoreData(comp, text) {
+        var engine = helper(comp, helperNames(text).engine), parts = engine ? engine.comment.split('|') : [];
+        return { justification: parts[2] ? parseInt(parts[2], 10) : null, original: parts[3] ? parseInt(parts[3], 10) : null };
+    }
+    function isAutoArea(layer) { return layer.name.indexOf(AUTO_AREA) === 0; }
     function layerIds(list) { var out = []; for (var i = 0; i < list.length; i++) out.push(list[i].id); return out.join(','); }
+    function without(list, layer) { var out = []; for (var i = 0; i < list.length; i++) if (list[i] !== layer) out.push(list[i]); return out; }
 
     /* ---- shapes to expression code ---- */
     function accessor(group, property, parentExpr) {
@@ -78,7 +117,7 @@
     function regionCode(layer, listName, index, control) {
         var v = listName + index, ref = v + 'Layer', lines = [];
         lines.push('var ' + ref + ' = thisLayer.effect(' + quote(control) + ')(1);');
-        lines.push('var ' + v + ' = { data: [] }; ' + listName + '.push(' + v + ');');
+        lines.push('var ' + v + ' = { data: [] };');
         function emit(fn, chain, target) { lines.push(fn + '(' + v + ', ' + ref + ', [' + chain.join(', ') + '], ' + target + ');'); }
         var found = 0;
         if (layer instanceof ShapeLayer) found = walkShapes(layer.property('ADBE Root Vectors Group'), ref, [], emit);
@@ -88,7 +127,9 @@
             found++;
         }
         if (!found) lines.push('addBounds(' + v + ', ' + ref + ');');
-        return lines.join('\n');
+        lines.push(listName + '.push(' + v + ');');
+        // A deleted layer or shape skips this region, not the whole layout.
+        return 'try {\n' + lines.join('\n') + '\n} catch (e) { missing++; }';
     }
 
     /* ---- setup pieces ---- */
@@ -112,10 +153,10 @@
         menu.setValue(value);
         menu.propertyGroup(1).name = name;
     }
-    function addControls(layer) {
+    function addControls(layer, alignment, justifyFinal) {
         addSlider(layer, 'TW Padding', 12);
-        addDropdown(layer, 'TW Allineamento', ['Sinistra', 'Centro', 'Destra', 'Giustificato'], 4);
-        addCheckbox(layer, 'TW Giustifica ultima riga', 0);
+        addDropdown(layer, 'TW Allineamento', ['Sinistra', 'Centro', 'Destra', 'Giustificato'], alignment);
+        addCheckbox(layer, 'TW Giustifica ultima riga', justifyFinal ? 1 : 0);
         addDropdown(layer, 'TW Overflow', ['Mostra le parole che entrano', 'Nascondi tutto'], 1);
         addSlider(layer, 'TW Interlinea extra', 0);
         addSlider(layer, 'TW Spazio paragrafi', 0);
@@ -161,37 +202,85 @@
         addLayerControl(layer, CONTROL_TEXT, text);
         return layer;
     }
-    function defaultArea(comp, name, rect) {
-        var r = rect || [comp.width * 0.15, comp.height * 0.15, comp.width * 0.7, comp.height * 0.7];
+    // The rectangle of a block in its own layer coordinates, from AE's baselines.
+    function blockFrame(comp, text) {
+        var doc = textDoc(text).valueAtTime(0, false), locs = doc.baselineLocs, left = Infinity, right = -Infinity;
+        if (!locs || locs.length < 4) return null;
+        for (var i = 0; i + 3 < locs.length; i += 4) { left = Math.min(left, locs[i]); right = Math.max(right, locs[i + 2]); }
+        var frame = { left: left, right: right, baseline: locs[1], lastBaseline: locs[locs.length - 1], bottom: 0 };
+        if (doc.boxText) {
+            frame.left = doc.boxTextPos[0];
+            frame.right = doc.boxTextPos[0] + doc.boxTextSize[0];
+            frame.bottom = doc.boxTextPos[1] + doc.boxTextSize[1];
+            return frame;
+        }
+        // Point text has no box: leave room for the lines pushed down by the shapes.
+        // The longest line must fit: 2 px of room on the side the text can grow to.
+        var before = 0, after = 2;
+        if (doc.justification === ParagraphJustification.CENTER_JUSTIFY) { before = 1; after = 1; }
+        else if (doc.justification === ParagraphJustification.RIGHT_JUSTIFY) { before = 2; after = 0; }
+        frame.left -= before;
+        frame.right += after;
+        var group = text.property('ADBE Transform Group'), scale = group.property('ADBE Scale').value[1] / 100;
+        var position = group.property('ADBE Position').value[1], anchor = group.property('ADBE Anchor Point').value[1];
+        frame.bottom = text.parent || !scale ? frame.lastBaseline + (frame.lastBaseline - frame.baseline) / 2 : anchor + (comp.height - position) / scale;
+        return frame;
+    }
+    // A guide child of the text: moving, scaling or rotating the block moves the wrap too.
+    function addAutoArea(comp, text) {
         var layer = comp.layers.addShape();
-        layer.name = 'TW Area - ' + name;
+        layer.name = AUTO_AREA + text.name.substr(0, 30);
         var group = layer.property('ADBE Root Vectors Group').addProperty('ADBE Vector Group');
         var shapes = group.property('ADBE Vectors Group');
-        shapes.addProperty('ADBE Vector Shape - Rect').property('ADBE Vector Rect Size').setValue([r[2], r[3]]);
+        shapes.addProperty('ADBE Vector Shape - Rect');
         var stroke = shapes.addProperty('ADBE Vector Graphic - Stroke');
         stroke.property('ADBE Vector Stroke Color').setValue([0.4, 0.7, 1, 1]);
         stroke.property('ADBE Vector Stroke Width').setValue(1);
-        layer.property('ADBE Transform Group').property('ADBE Position').setValue([r[0] + r[2] / 2, r[1] + r[3] / 2]);
         layer.guideLayer = true;
+        layer.setParentWithJump(text);
         return layer;
+    }
+    // The engine sets the first baseline at the top of the area minus the ascent.
+    function fitAutoArea(layer, frame, ascent, descent) {
+        var top = frame.baseline - ascent, bottom = Math.max(frame.bottom, frame.lastBaseline - descent + 1);
+        var rect = layer.property('ADBE Root Vectors Group').property(1).property('ADBE Vectors Group').property(1);
+        rect.property('ADBE Vector Rect Size').setValue([frame.right - frame.left, bottom - top]);
+        layer.property('ADBE Transform Group').property('ADBE Position').setValue([(frame.left + frame.right) / 2, (top + bottom) / 2]);
+    }
+    function copyProperty(from, to) {
+        if (from.expression) to.expression = from.expression;
+        if (!from.numKeys) { to.setValue(from.value); return; }
+        for (var k = 1; k <= from.numKeys; k++) {
+            to.setValueAtTime(from.keyTime(k), from.keyValue(k));
+            to.setInterpolationTypeAtKey(k, from.keyInInterpolationType(k), from.keyOutInterpolationType(k));
+            if (from.keyInInterpolationType(k) === KeyframeInterpolationType.BEZIER) to.setTemporalEaseAtKey(k, from.keyInTemporalEase(k), from.keyOutTemporalEase(k));
+        }
+    }
+    function copyTransform(from, to) {
+        var a = from.property('ADBE Transform Group'), b = to.property('ADBE Transform Group'), list = ['ADBE Anchor Point', 'ADBE Scale', 'ADBE Rotate Z', 'ADBE Opacity'];
+        if (a.property('ADBE Position').dimensionsSeparated) {
+            b.property('ADBE Position').dimensionsSeparated = true;
+            list.push('ADBE Position_0', 'ADBE Position_1');
+        } else list.push('ADBE Position');
+        for (var i = 0; i < list.length; i++) copyProperty(a.property(list[i]), b.property(list[i]));
     }
     // Box text wraps by itself and its word positions cannot be predicted, so
     // the wrap needs point text. boxText is read-only: a new layer is the only way.
     function pointTextFrom(comp, box) {
-        var doc = textDoc(box).value, fresh = comp.layers.addText(doc.text), target = textDoc(fresh).value;
-        var fields = ['font', 'fontSize', 'tracking', 'leading', 'autoLeading', 'applyFill', 'fillColor', 'applyStroke', 'strokeWidth', 'strokeColor', 'fauxBold', 'fauxItalic'];
-        for (var i = 0; i < fields.length; i++) { try { target[fields[i]] = doc[fields[i]]; } catch (e) { /* not set on this document */ } }
+        var doc = textDoc(box).valueAtTime(0, false), fresh = comp.layers.addText(doc.text), target = textDoc(fresh).value;
+        for (var i = 0; i < STYLE_FIELDS.length; i++) { try { target[STYLE_FIELDS[i]] = doc[STYLE_FIELDS[i]]; } catch (e) { /* not set on this document */ } }
         textDoc(fresh).setValue(target);
-        var position = box.property('ADBE Transform Group').property('ADBE Position').value;
-        var anchor = box.property('ADBE Transform Group').property('ADBE Anchor Point').value;
-        fresh.property('ADBE Transform Group').property('ADBE Position').setValue(position);
+        copyTransform(box, fresh);
+        var fields = ['startTime', 'inPoint', 'outPoint', 'blendingMode', 'motionBlur', 'quality', 'label', 'shy'];
+        for (var f = 0; f < fields.length; f++) { try { fresh[fields[f]] = box[fields[f]]; } catch (e2) { /* not available on this layer */ } }
+        if (box.parent) fresh.setParentWithJump(box.parent);
         fresh.moveBefore(box);
+        if (effects(box).numProperties || box.property('ADBE Mask Parade').numProperties) notify(box.name.substr(0, 30) + ': effetti e maschere del testo in box non vengono copiati sul nuovo livello.');
         var name = box.name;
-        box.name = name + ' (box originale)';
+        box.name = name + ORIGINAL_SUFFIX;
         box.enabled = false;
         fresh.name = name;
-        var offset = doc.boxTextPos, size = doc.boxTextSize;
-        return { layer: fresh, rect: [position[0] - anchor[0] + offset[0], position[1] - anchor[1] + offset[1], size[0], size[1]] };
+        return fresh;
     }
 
     // Reads AE's word count by lifting the layer 10 px per word for a moment.
@@ -204,29 +293,74 @@
         amount.expression = real;
         return Math.round((rest - lifted) / 10);
     }
-    function expectedWords(cache) {
-        var found = textDoc(cache).valueAtTime(0, false).text.match(/"words":(\d+)/);
-        return found ? parseInt(found[1], 10) : -1;
-    }
-
     // Sets the text under a layer's expression, which reads it back as value.
     function storeText(layer, value) { textDoc(layer).setValue(new TextDocument(value)); }
-
-    function install(comp, text, area, exclusions) {
-        var boxRect = null;
-        if (textDoc(text).value.boxText) {
-            var converted = pointTextFrom(comp, text);
-            text = converted.layer;
-            boxRect = converted.rect;
+    function alignmentOf(justification) {
+        var J = ParagraphJustification;
+        if (justification === J.CENTER_JUSTIFY) return 2;
+        if (justification === J.RIGHT_JUSTIFY) return 3;
+        return justification === J.LEFT_JUSTIFY ? 1 : 4;
+    }
+    function measure(json, field) {
+        var found = json.match(new RegExp('"' + field + '":(-?[0-9.eE+-]+)'));
+        return found ? parseFloat(found[1]) : 0;
+    }
+    // A duplicated block still reads the wrap of its source: it starts from the same setup.
+    function duplicatedFrom(comp, text) {
+        var linked = linkedId(text);
+        if (linked === null || linked === text.id) return null;
+        var engine = helper(comp, helperIds(linked).engine);
+        return engine && controlTarget(comp, engine, CONTROL_TEXT) !== text ? engineLayers(comp, engine) : null;
+    }
+    // A text with its own wrap is an obstacle through its area: reading the text
+    // itself would see its parked words, and two blocks would depend on each other.
+    function obstacles(comp, text, list, area) {
+        var out = [];
+        function add(layer) {
+            for (var o = 0; o < out.length; o++) if (out[o] === layer) return;
+            for (var a = 0; a < area.length; a++) if (area[a] === layer) return;
+            if (layer !== text) out.push(layer);
         }
-        if (!area.length) area = [defaultArea(comp, text.name, boxRect)];
+        for (var i = 0; i < list.length; i++) {
+            if (isText(list[i]) && isInstalled(list[i])) { var own = savedLayers(comp, list[i]).area; for (var k = 0; k < own.length; k++) add(own[k]); }
+            else add(list[i]);
+        }
+        return out;
+    }
+    function install(comp, text, area, exclusions) {
+        if (text.threeDLayer) throw new Error('i livelli 3D non sono supportati.');
+        if (text.locked) throw new Error('il livello e bloccato.');
+        area = without(area, text);
+        exclusions = without(exclusions, text);
+        // Before the animator goes: on a comp copy the names come from its selector.
+        var restore = restoreData(comp, text), source = duplicatedFrom(comp, text), names = helperNames(text);
+        removeAnimators(text);
+        var doc = textDoc(text).valueAtTime(0, false), justification = restore.justification !== null ? restore.justification : doc.justification;
+        var frame = area.length || source ? null : blockFrame(comp, text), original = restore.original;
+        if (doc.boxText) {
+            original = text.id;
+            text = pointTextFrom(comp, text);
+            names = helperIds(text.id);
+        }
+        if (source) {
+            for (var s = 0; s < source.area.length && !area.length; s++) {
+                if (!isAutoArea(source.area[s])) { area = source.area; break; }
+                var copy = source.area[s].duplicate();
+                copy.name = AUTO_AREA + text.name.substr(0, 30);
+                copy.setParentWithJump(text);
+                area = [copy];
+            }
+            if (!exclusions.length) exclusions = source.exclusions;
+        }
+        var auto = null;
+        if (!area.length) { auto = addAutoArea(comp, text); area = [auto]; }
+        exclusions = obstacles(comp, text, exclusions, area);
 
-        var doc = textDoc(text).value;
+        doc = textDoc(text).value;
         doc.justification = ParagraphJustification.LEFT_JUSTIFY;
         textDoc(text).setValue(doc);
 
-        addControls(text);
-        var names = helperNames(text);
+        addControls(text, alignmentOf(justification), justification === ParagraphJustification.FULL_JUSTIFY_LASTLINE_FULL);
         var metrics = addHelper(comp, names.metrics, text), cache = addHelper(comp, names.cache, text), engine = addHelper(comp, names.engine, text);
         var regions = [];
         for (var a = 0; a < area.length; a++) {
@@ -240,37 +374,67 @@
 
         var vars = { '__SRC__': 'thisLayer.effect(' + quote(CONTROL_TEXT) + ')(1)', '__METRICS__': quote(names.metrics), '__CACHE__': quote(names.cache), '__ENGINE__': quote(names.engine), '__SCALE__': String(SCALE), '__BY_WORDS__': 'true', '__STALE__': quote(STALE), '__PARKED__': String(PARKED), '/*@@REGIONS@@*/': regions.join('\n') };
         textDoc(metrics).expression = EXPR.atoms + '\n' + fill(EXPR.metrics, vars);
-        textDoc(cache).expression = EXPR.atoms + '\n' + fill(EXPR.cache, vars);
-        storeText(cache, 'TW');
-        textDoc(engine).expression = EXPR.core + '\n' + fill(EXPR.engine, vars);
-
-        removeAnimators(text);
         removeAnimators(metrics);
         addAnimator(metrics, ANIM_COUNT, 'ADBE Text Position 3D', [0, POSITION, 0], BASED_ON_WORDS, EXPR.count);
+        // Measures are stored before any selector exists: every word that reads the
+        // engine would otherwise wait for a full measurement.
+        function storeMeasures() {
+            textDoc(cache).expression = EXPR.atoms + '\n' + fill(EXPR.cache, vars);
+            storeText(cache, 'TW');
+            var measures = textDoc(cache).valueAtTime(0, false).text;
+            storeText(cache, measures);
+            storeText(engine, measures);
+            return measures;
+        }
+        var measures = storeMeasures();
+        textDoc(engine).expression = EXPR.core + '\n' + fill(EXPR.engine, vars);
+        if (auto) fitAutoArea(auto, frame || emptyFrame(comp), measure(measures, 'ascent'), measure(measures, 'descent'));
         var selector = addAnimator(text, ANIM_MOVE, 'ADBE Text Position 3D', [POSITION, POSITION, 0], BASED_ON_WORDS, fill(EXPR.selector, vars));
         // Words are several times cheaper to evaluate than characters. Use them
         // unless AE's own count on the real layer disagrees (mixed fonts).
-        var stale = status(text) === STALE, mixed = wordsOnLayer(text, selector) !== expectedWords(cache);
+        var stale = status(text) === STALE, mixed = wordsOnLayer(text, selector) !== measure(measures, 'words');
         if (stale || mixed) {
             vars['__BY_WORDS__'] = 'false';
-            textDoc(cache).expression = EXPR.atoms + '\n' + fill(EXPR.cache, vars);
+            storeMeasures();
             selector.property('ADBE Text Range Type2').setValue(BASED_ON_CHARACTERS);
         }
-        if (mixed) alert('Questo testo usa piu font nello stesso livello, forse per un simbolo non presente nel font principale.\nLe righe possono uscire dai margini: usa un solo font o rimuovi il simbolo, poi premi Applica / Aggiorna wrap.');
+        if (mixed) notify('Questo testo usa piu font nello stesso livello, forse per un simbolo non presente nel font principale.\nLe righe possono uscire dai margini: usa un solo font o rimuovi il simbolo, poi premi Applica / Aggiorna wrap.');
 
-        var measures = textDoc(cache).valueAtTime(0, false).text;
-        storeText(cache, measures);
-        storeText(engine, measures);
-        engine.comment = layerIds(area) + '|' + layerIds(exclusions);
+        engine.comment = layerIds(area) + '|' + layerIds(exclusions) + '|' + justification + '|' + (original || '');
         metrics.locked = true;
         cache.locked = true;
         engine.locked = true;
         return text;
     }
+    function emptyFrame(comp) { return { left: 0, right: comp.width / 2, baseline: 0, lastBaseline: 0, bottom: comp.height / 2 }; }
+    // The disabled box a text was converted from. Older wraps did not record it, and
+    // their removal left it off, so it is also found by the name the conversion gave it.
+    function originalOf(comp, text, id) {
+        var recorded = id ? byId(comp, id) : null;
+        if (recorded) return recorded;
+        var wanted = text.name + ORIGINAL_SUFFIX, body = textDoc(text).value.text, named = null;
+        for (var i = 1; i <= comp.numLayers; i++) {
+            var layer = comp.layer(i);
+            if (layer === text || layer.name !== wanted || !isText(layer)) continue;
+            if (textDoc(layer).value.text === body) return layer;
+            named = named || layer;
+        }
+        return named;
+    }
+    // The block to act on when the disabled original is selected instead: they look alike.
+    function activeBlock(comp, layer) {
+        var at = layer.name.length - ORIGINAL_SUFFIX.length;
+        if (at <= 0 || layer.name.indexOf(ORIGINAL_SUFFIX, at) !== at) return layer;
+        var name = layer.name.substr(0, at);
+        for (var i = 1; i <= comp.numLayers; i++) if (comp.layer(i).name === name && isText(comp.layer(i))) return comp.layer(i);
+        return layer;
+    }
+    function canRemove(comp, text) { return isInstalled(text) || !!originalOf(comp, text, null); }
+    // Puts the block back as it was. Returns the layer that remains.
     function uninstall(text) {
         var comp = text.containingComp, names = helperNames(text), list = [names.metrics, names.cache, names.engine];
-        var area = savedLayers(comp, text).area;
-        for (var d = 0; d < area.length; d++) if (area[d].name.indexOf('TW Area - ') === 0) area[d].remove();
+        var area = savedLayers(comp, text).area, restore = restoreData(comp, text);
+        for (var d = 0; d < area.length; d++) if (isAutoArea(area[d])) area[d].remove();
         removeAnimators(text);
         var fx = effects(text);
         for (var i = fx.numProperties; i >= 1; i--) if (fx.property(i).name.indexOf('TW ') === 0) fx.property(i).remove();
@@ -278,6 +442,17 @@
             var layer = helper(comp, list[n]);
             if (layer) { layer.locked = false; layer.remove(); }
         }
+        var doc = textDoc(text).value, original = originalOf(comp, text, restore.original);
+        if (original) {
+            var box = textDoc(original).value;
+            if (box.text !== doc.text) { box.text = doc.text; textDoc(original).setValue(box); }
+            original.enabled = true;
+            original.name = text.name;
+            text.remove();
+            return original;
+        }
+        if (restore.justification !== null) { doc.justification = restore.justification; textDoc(text).setValue(doc); }
+        return text;
     }
     function status(text) {
         var engine = helper(text.containingComp, helperNames(text).engine);
@@ -325,6 +500,7 @@
         doc.applyFill = true;
         doc.fillColor = [0.12, 0.14, 0.17];
         doc.applyStroke = false;
+        doc.justification = ParagraphJustification.FULL_JUSTIFY_LASTLINE_LEFT;
         textDoc(text).setValue(doc);
         text.property('ADBE Transform Group').property('ADBE Position').setValue([180, 150]);
         install(comp, text, [area], [circle]);
@@ -389,10 +565,12 @@
             return out;
         }
         function isInstalledHelper(layer) { return layer.name.indexOf('TW Metriche #') === 0 || layer.name.indexOf('TW Cache #') === 0 || layer.name.indexOf('TW Motore #') === 0; }
-        function selectedText(comp) {
-            for (var i = 0; i < comp.selectedLayers.length; i++) if (isText(comp.selectedLayers[i]) && !isInstalledHelper(comp.selectedLayers[i])) return comp.selectedLayers[i];
-            return null;
+        function selectedTexts(comp) {
+            var out = [];
+            for (var i = 0; i < comp.selectedLayers.length; i++) if (isText(comp.selectedLayers[i]) && !isInstalledHelper(comp.selectedLayers[i])) out.push(comp.selectedLayers[i]);
+            return out;
         }
+        function selectedText(comp) { return selectedTexts(comp)[0] || null; }
         function contains(list, layer) { for (var i = 0; i < list.length; i++) if (list[i] === layer) return true; return false; }
         function needComp() { var c = activeComp(); if (!c) alert('Apri una composizione.'); return c; }
 
@@ -414,29 +592,42 @@
         exRemove.onClick = function () {
             if (exList.selection) { exclusions.splice(exList.selection.index, 1); refresh(); }
         };
+        // Every selected text gets its own wrap around the selected shapes. A text
+        // listed by hand as area or exclusion stays what the list says it is.
+        function setupFor(comp, text, single, all) {
+            var useArea = single ? area : [], useExclusions = exclusions.slice(0);
+            if (loadedFor === text.id) return { area: useArea, exclusions: useExclusions };
+            var saved = savedLayers(comp, text);
+            if (!useArea.length) useArea = saved.area;
+            if (!useExclusions.length) useExclusions = saved.exclusions;
+            for (var i = 0; i < all.length; i++) if (!isText(all[i]) && !contains(useArea, all[i]) && !contains(useExclusions, all[i])) useExclusions.push(all[i]);
+            return { area: useArea, exclusions: useExclusions };
+        }
         apply.onClick = function () {
             var comp = needComp(); if (!comp) return;
-            var text = selectedText(comp);
-            if (!text) { alert('Seleziona un livello di testo.'); return; }
+            // Read once: installing a wrap adds layers and changes the selection.
+            var picked = selectedTexts(comp), selection = shapesInSelection(comp), targets = [];
+            for (var i = 0; i < picked.length; i++) if (!contains(exclusions, picked[i]) && (picked.length === 1 || !contains(area, picked[i]))) targets.push(picked[i]);
+            if (!targets.length) { alert('Seleziona un livello di testo.'); return; }
             if (!checkEngine()) return;
-            var useArea = area, useExclusions = exclusions;
-            if (loadedFor !== text.id) {
-                // Not edited through Carica: keep what is installed and treat
-                // anything else in the selection as a new exclusion.
-                var saved = savedLayers(comp, text), all = shapesInSelection(comp);
-                if (!useArea.length) useArea = saved.area;
-                if (!exclusions.length) {
-                    useExclusions = saved.exclusions;
-                    for (var i = 0; i < all.length; i++) if (all[i] !== text && !contains(useArea, all[i]) && !contains(useExclusions, all[i])) useExclusions.push(all[i]);
-                }
-            }
             guarded('Applica', function () {
-                var result = install(comp, text, useArea, useExclusions);
+                var failed = [], result = null;
+                notices = [];
+                if (area.length && targets.length > 1) notify("Con piu testi selezionati l'area scelta non viene usata: ogni blocco tiene la propria.");
+                for (var t = 0; t < targets.length; t++) {
+                    try {
+                        var setup = setupFor(comp, targets[t], targets.length === 1, selection);
+                        result = install(comp, targets[t], setup.area, setup.exclusions);
+                    } catch (e) { failed.push(targets[t].name.substr(0, 30) + ': ' + e.message); }
+                }
+                var messages = failed.concat(notices);
+                notices = null;
                 area = [];
                 exclusions = [];
                 loadedFor = null;
                 refresh();
-                statusLabel.text = status(result);
+                statusLabel.text = targets.length > 1 ? (targets.length - failed.length) + ' blocchi su ' + targets.length + ' aggiornati.' : (result ? status(result) : 'Wrap non applicato.');
+                if (messages.length) alert(messages.join('\n\n'));
             });
         };
         check.onClick = function () {
@@ -452,9 +643,14 @@
         };
         remove.onClick = function () {
             var comp = needComp(); if (!comp) return;
-            var text = selectedText(comp);
-            if (!text) { alert('Seleziona il livello di testo.'); return; }
-            guarded('Rimuovi', function () { uninstall(text); statusLabel.text = 'Wrap rimosso.'; });
+            var texts = selectedTexts(comp);
+            if (!texts.length) { alert('Seleziona il livello di testo.'); return; }
+            guarded('Rimuovi', function () {
+                var blocks = [], removed = 0;
+                for (var i = 0; i < texts.length; i++) { var block = activeBlock(comp, texts[i]); if (!contains(blocks, block)) blocks.push(block); }
+                for (var b = 0; b < blocks.length; b++) if (canRemove(comp, blocks[b])) { uninstall(blocks[b]); removed++; }
+                statusLabel.text = removed ? 'Wrap rimosso.' : 'Nessun wrap sul livello selezionato.';
+            });
         };
         demo.onClick = function () { if (checkEngine()) guarded('Demo', createDemo); };
 
@@ -465,7 +661,7 @@
 
     // Test hook: tests/verify-ae.jsx sets this flag to drive the same code as the panel.
     if ($.global.TEXT_WRAP_TEST) {
-        $.global.TEXT_WRAP_API = { install: install, uninstall: uninstall, status: status, createDemo: createDemo, helperNames: helperNames, textDoc: textDoc, buildUI: buildUI, savedLayers: savedLayers };
+        $.global.TEXT_WRAP_API = { install: install, uninstall: uninstall, status: status, createDemo: createDemo, helperNames: helperNames, textDoc: textDoc, buildUI: buildUI, savedLayers: savedLayers, isInstalled: isInstalled, blockFrame: blockFrame };
         return;
     }
     var ui = buildUI(thisObj);

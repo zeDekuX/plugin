@@ -1,11 +1,12 @@
 /* Full check inside After Effects. Needs $.global.TW_OUT, TW_FRAMES, TW_SCRIPT.
+ * $.global.TW_ONLY, a regular expression, limits the run to the matching steps.
  * Works in throwaway comps and removes them at the end; never saves the project. */
 (function () {
     var OUT = new File($.global.TW_OUT), DIR = $.global.TW_FRAMES;
     OUT.encoding = 'UTF-8'; OUT.open('w'); OUT.close();
     function L(s) { OUT.open('a'); OUT.write(String(s) + '\n'); OUT.close(); }
     function why(e) { var m = '?', l = '?'; try { m = e.message; } catch (x) {} try { l = e.line; } catch (x) {} return m + ' @' + l; }
-    function step(name, f) { try { L('OK  ' + name + ': ' + String(f())); } catch (e) { L('BAD ' + name + ': ' + why(e)); } }
+    function step(name, f) { if ($.global.TW_ONLY && !$.global.TW_ONLY.test(name)) return; try { L('OK  ' + name + ': ' + String(f())); } catch (e) { L('BAD ' + name + ': ' + why(e)); } }
     var alerts = [];
     $.global.alert = function (m) { alerts.push(String(m)); };
     $.global.TEXT_WRAP_TEST = true;
@@ -58,7 +59,7 @@
     step('demo', function () { API.createDemo(); return 'ok'; });
     var demo = null;
     for (var j = 1; j <= proj.numItems; j++) if (proj.item(j).name === 'DEMO - Text Wrap') demo = proj.item(j);
-    made.push(demo);
+    if (demo) made.push(demo);
     step('demo sweep', function () {
         var t = demo.layer('Testo'), circle = demo.layer('Esclusione'), lines = [];
         for (var f = 0; f <= 100; f += 5) {
@@ -193,6 +194,186 @@
         d = doc(t).value; d.text = 'solo poche parole adesso'; doc(t).setValue(d);
         expect('text edit', false, layout);
         return st(c, t);
+    });
+    // Blocks: what the user sees must not change when a wrap is applied.
+    function panelFor(c) {
+        c.openInViewer();
+        var w = API.buildUI(null), buttons = {};
+        (function find(g) { for (var i = 0; i < g.children.length; i++) { var k = g.children[i]; if (k.type === 'button') buttons[k.text] = k; if (k.children && k.children.length) find(k); } })(w);
+        return { window: w, click: function (name, layers) {
+            for (var i = 1; i <= c.numLayers; i++) c.layer(i).selected = false;
+            for (var n = 0; n < layers.length; n++) layers[n].selected = true;
+            buttons[name].notify('onClick');
+        } };
+    }
+    function box(c, name, size, at) {
+        var b = c.layers.addBoxText(size, lorem), d = doc(b).value; b.name = name;
+        d.font = 'ArialMT'; d.fontSize = 22; d.autoLeading = false; d.leading = 28; d.tracking = 0; d.applyFill = true; d.fillColor = [0, 0, 0]; d.applyStroke = false;
+        d.justification = ParagraphJustification.FULL_JUSTIFY_LASTLINE_LEFT; doc(b).setValue(d); pos(b, at);
+        return b;
+    }
+    function find(c, prefix, skip) { var o = []; for (var i = 1; i <= c.numLayers; i++) if (c.layer(i).name.indexOf(prefix) === 0 && c.layer(i) !== skip) o.push(c.layer(i)); return o; }
+    function need(ok, what) { if (!ok) throw new Error(what); }
+    function rectOf(t) { var r = t.sourceRectAtTime(0, false); return [r.left, r.top, r.width, r.height]; }
+    function sameRect(a, b, what) { for (var i = 0; i < 4; i++) need(Math.abs(a[i] - b[i]) <= 1.5, what + ': ' + a.join(',') + ' -> ' + b.join(',')); }
+    function layout(c, t) { return doc(c.layer(API.helperNames(t).engine)).valueAtTime(0, false).text; }
+    function clean(c, t) { var e = errs(c, t); need(!e, e); }
+    step('two blocks through the panel', function () {
+        var c = comp('two'), a = box(c, 'A', [420, 560], [260, 350]), b = box(c, 'B', [420, 560], [740, 350]), e = shape(c, 'E', 'ellipse', [240, 240]); pos(e, [500, 350]);
+        var p = panelFor(c);
+        p.click('Applica / Aggiorna wrap', [a, b, e]);
+        var ta = c.layer('A'), tb = c.layer('B');
+        need(find(c, 'TW Motore #').length === 2, 'two engines');
+        need(API.savedLayers(c, ta).exclusions[0] === e && API.savedLayers(c, tb).exclusions[0] === e, 'both blocks wrap the shape');
+        need(API.savedLayers(c, ta).area[0] !== API.savedLayers(c, tb).area[0], 'each block has its own area');
+        var la = layout(c, ta), lb = layout(c, tb);
+        pos(e, [300, 200]); need(layout(c, ta) !== la, 'A follows the shape');
+        pos(e, [800, 200]); need(layout(c, tb) !== lb, 'B follows the shape');
+        clean(c, ta); clean(c, tb);
+        p.click('Rimuovi wrap', [ta, tb]);
+        p.window.close();
+        need(find(c, 'TW ').length === 0, 'nothing left');
+        need(a.enabled && b.enabled && a.name === 'A' && b.name === 'B', 'boxes restored');
+        return 'ok';
+    });
+    step('blocks stay in place', function () {
+        var J = ParagraphJustification, kinds = [['left', J.LEFT_JUSTIFY, 1], ['center', J.CENTER_JUSTIFY, 2], ['right', J.RIGHT_JUSTIFY, 3], ['full', J.FULL_JUSTIFY_LASTLINE_LEFT, 4]], o = [];
+        for (var i = 0; i < kinds.length; i++) {
+            var c = comp('stay' + i), b = box(c, 'B', [500, 500], [500, 350]), d = doc(b).value; d.justification = kinds[i][1]; doc(b).setValue(d);
+            var g = b.property('ADBE Transform Group'); g.property('ADBE Anchor Point').setValue([-40, 25]); g.property('ADBE Scale').setValue([80, 90]); g.property('ADBE Rotate Z').setValue(7);
+            var before = rectOf(b), t = API.install(c, b, [], []);
+            sameRect(before, rectOf(t), kinds[i][0]);
+            need(t.property('ADBE Effect Parade').property('TW Allineamento').property(1).value === kinds[i][2], kinds[i][0] + ' alignment');
+            var h = t.property('ADBE Transform Group'); need(h.property('ADBE Scale').value[0] === 80 && h.property('ADBE Rotate Z').value === 7 && h.property('ADBE Anchor Point').value[0] === -40, kinds[i][0] + ' transform');
+            clean(c, t); o.push(kinds[i][0]);
+        }
+        var cp = comp('stayp'), tp = text(cp, 'Prima riga\rSeconda riga piu lunga\rTerza', 40, 48), rp = rectOf(tp); API.install(cp, tp, [], []); sameRect(rp, rectOf(tp), 'point');
+        return o.join(' ') + ' point';
+    });
+    step('moving a block moves its wrap', function () {
+        var c = comp('move'), t = text(c, 'Prima riga\rSeconda riga\rTerza', 40, 48); API.install(c, t, [], []);
+        var a = API.savedLayers(c, t).area[0], before = layout(c, t), r = rectOf(t);
+        need(a.parent === t, 'area follows the text');
+        pos(t, [300, 260]); t.property('ADBE Transform Group').property('ADBE Rotate Z').setValue(15);
+        need(layout(c, t) === before, 'layout unchanged'); sameRect(r, rectOf(t), 'rect'); clean(c, t);
+        return 'ok';
+    });
+    step('deleted layers', function () {
+        var c = comp('del'), t = text(c, lorem), a = area(c), e = shape(c, 'E', 'ellipse', [200, 200]), f = shape(c, 'F', 'rect', [100, 100]); pos(e, [500, 350]); pos(f, [300, 300]);
+        API.install(c, t, [a], [e, f]);
+        e.remove(); var s1 = st(c, t); need(s1.indexOf('OK') === 0 && s1.indexOf('non trovati') > 0, 'exclusion: ' + s1);
+        a.remove(); var s2 = st(c, t); need(s2.indexOf('ERRORE') === 0, 'area: ' + s2);
+        var n = API.helperNames(t), en = c.layer(n.engine); en.locked = false; en.remove();
+        var an = t.property('ADBE Text Properties').property('ADBE Text Animators').property(1).property('ADBE Text Selectors').property(1).property('ADBE Text Expressible Amount');
+        t.sourceRectAtTime(0, false); need(!an.expressionError, 'selector: ' + an.expressionError);
+        return s1 + ' / ' + s2;
+    });
+    step('duplicates', function () {
+        var c = comp('dup'), t = text(c, lorem), e = shape(c, 'E', 'ellipse', [200, 200]); pos(e, [400, 300]); API.install(c, t, [], [e]);
+        var first = layout(c, t), d = t.duplicate(); d.name = 'Copia'; API.install(c, d, [], []);
+        need(find(c, 'TW Motore #').length === 2, 'duplicate has its own engine');
+        need(API.savedLayers(c, d).area[0].parent === d, 'duplicate has its own area');
+        need(API.savedLayers(c, d).exclusions[0] === e, 'duplicate keeps the shapes');
+        need(layout(c, t) === first, 'source untouched'); clean(c, d);
+        var k = c.duplicate(), kt = k.layer('T'); made.push(k);
+        need(API.isInstalled(kt), 'comp copy keeps its wrap');
+        var count = k.numLayers; API.install(k, kt, API.savedLayers(k, kt).area, API.savedLayers(k, kt).exclusions);
+        need(k.numLayers === count, 'no orphans in the comp copy: ' + count + ' -> ' + k.numLayers); clean(k, kt);
+        return st(k, kt);
+    });
+    step('blocks as obstacles', function () {
+        var c = comp('obst'), a = text(c, 'Blocco uno\rcon due righe', 40, 48), b = text(c, lorem, 22, 28), big = area(c); pos(a, [200, 120]);
+        API.install(c, a, [], []); API.install(c, b, [big], [a]);
+        need(API.savedLayers(c, b).exclusions[0] === API.savedLayers(c, a).area[0], 'obstacle is the area of the wrapped block');
+        clean(c, a); clean(c, b);
+        var plain = text(c, 'Solo testo', 40, 48), other = text(c, lorem, 22, 28); pos(plain, [500, 300]); API.install(c, other, [big], [plain]);
+        API.install(c, plain, [], []); var s = st(c, other); need(s.indexOf('ERRORE') < 0, s); clean(c, other);
+        return s;
+    });
+    step('extreme values', function () {
+        var c = comp('ext'), t = text(c, lorem), a = area(c), e = shape(c, 'E', 'ellipse', [200, 200]); pos(e, [500, 350]); API.install(c, t, [a], [e]);
+        var fx = t.property('ADBE Effect Parade'), o = [];
+        function set(name, v) { fx.property(name).property(1).setValue(v); var s = st(c, t); o.push(name.substr(3, 6) + '=' + v + ' ' + s.substr(0, 8)); }
+        set('TW Padding', -50); set('TW Padding', 5000); set('TW Padding', 12);
+        set('TW Tolleranza curve', 0); set('TW Tolleranza curve', 100000); set('TW Tolleranza curve', 0.5);
+        set('TW Interlinea extra', -1000); set('TW Interlinea extra', 0); set('TW Spazio paragrafi', 100000); set('TW Spazio paragrafi', 0);
+        var g = e.property('ADBE Transform Group'); g.property('ADBE Scale').setValue([0, 0]); clean(c, t); need(st(c, t).indexOf('ERRORE') < 0, 'scale 0');
+        g.property('ADBE Scale').setValue([100, 100]); pos(e, [1e6, 1e6]); need(st(c, t).indexOf('OK') === 0, 'far shape');
+        var d = doc(t).value; d.text = ''; doc(t).setValue(d); clean(c, t); o.push('empty ' + st(c, t).substr(0, 12));
+        d = doc(t).value; d.text = 'Parolalunghissimasenzaspazi'; d.fontSize = 400; doc(t).setValue(d); clean(c, t); o.push('long ' + st(c, t).substr(0, 12));
+        return o.join(', ');
+    });
+    step('repeated apply', function () {
+        var c = comp('again'), t = text(c, lorem), e = shape(c, 'E', 'ellipse', [200, 200]); pos(e, [400, 300]); API.install(c, t, [], [e]);
+        var layers = c.numLayers, fx = t.property('ADBE Effect Parade').numProperties, first = layout(c, t);
+        for (var i = 0; i < 6; i++) { var saved = API.savedLayers(c, t); API.install(c, t, saved.area, saved.exclusions); }
+        need(c.numLayers === layers && t.property('ADBE Effect Parade').numProperties === fx, 'nothing piles up');
+        need(layout(c, t) === first, 'same layout'); clean(c, t);
+        return 'ok';
+    });
+    step('remove restores the block', function () {
+        var c = comp('rest'), t = text(c, 'Prima\rSeconda riga', 40, 48), d = doc(t).value; d.justification = ParagraphJustification.CENTER_JUSTIFY; doc(t).setValue(d);
+        var r = rectOf(t); API.install(c, t, [], []); var left = API.uninstall(t);
+        need(doc(left).value.justification === ParagraphJustification.CENTER_JUSTIFY, 'justification'); sameRect(r, rectOf(left), 'rect');
+        var b = box(c, 'B', [400, 400], [500, 350]), rb = rectOf(b), w = API.install(c, b, [], []), back = API.uninstall(w);
+        need(back === b && b.enabled && b.name === 'B', 'box'); sameRect(rb, rectOf(b), 'box rect');
+        need(find(c, 'TW ').length === 0, 'nothing left');
+        return 'ok';
+    });
+    step('remove finds older originals', function () {
+        var c = comp('old'), o = [];
+        function half(name) { // a converted block whose wrap is already gone, as older versions left it
+            var b = box(c, name, [400, 400], [500, 350]); b.name = name + ' (box originale)'; b.enabled = false;
+            var t = text(c, doc(b).value.text, 22, 28); t.name = name; return { box: b, text: t };
+        }
+        var p = panelFor(c), one = half('Uno');
+        p.click('Rimuovi wrap', [one.text]);
+        need(one.box.enabled && one.box.name === 'Uno' && find(c, 'Uno').length === 1, 'text selected');
+        var two = half('Due');
+        p.click('Rimuovi wrap', [two.box]);
+        need(two.box.enabled && two.box.name === 'Due' && find(c, 'Due').length === 1, 'original selected');
+        var b3 = box(c, 'Tre', [400, 400], [500, 350]), w = API.install(c, b3, [], []), engine = c.layer(API.helperNames(w).engine);
+        engine.locked = false; engine.comment = engine.comment.split('|').slice(0, 2).join('|'); // older format
+        p.click('Rimuovi wrap', [w]);
+        need(b3.enabled && b3.name === 'Tre' && find(c, 'TW ').length === 0, 'older wrap');
+        var plain = text(c, 'Solo testo'); p.click('Rimuovi wrap', [plain]);
+        var said = '';
+        (function look(g) { for (var i = 0; i < g.children.length; i++) { var k = g.children[i]; if (k.type === 'statictext' && k.text.indexOf('Nessun wrap') === 0) said = k.text; if (k.children && k.children.length) look(k); } })(p.window);
+        need(said, 'says when nothing was removed');
+        p.window.close();
+        return said;
+    });
+    step('refused layers', function () {
+        var c = comp('no'), t = text(c, 'Testo'), o = [];
+        t.threeDLayer = true; try { API.install(c, t, [], []); o.push('3D accepted'); } catch (e) { o.push(e.message); } t.threeDLayer = false;
+        t.locked = true; try { API.install(c, t, [], []); o.push('locked accepted'); } catch (e2) { o.push(e2.message); } t.locked = false;
+        need(find(c, 'TW ').length === 0, 'no leftovers'); need(o[0].indexOf('accepted') < 0 && o[1].indexOf('accepted') < 0, o.join());
+        return o.join(' / ');
+    });
+    step('drag stress, two blocks', function () {
+        var c = comp('stress'), a = box(c, 'A', [420, 620], [260, 350]), b = box(c, 'B', [420, 620], [740, 350]), e = shape(c, 'E', 'ellipse', [240, 240]); pos(e, [500, 350]);
+        var ta = API.install(c, a, [], [e]), tb = API.install(c, b, [], [e]), ca = doc(c.layer(API.helperNames(ta).cache)), times = [];
+        for (var i = 0; i < 200; i++) {
+            var at = new Date().getTime();
+            pos(e, [500 + 380 * Math.sin(i / 9), 350 + 250 * Math.cos(i / 7)]);
+            ta.sourceRectAtTime(0, false); tb.sourceRectAtTime(0, false);
+            times.push(new Date().getTime() - at);
+        }
+        times.sort(function (x, y) { return x - y; });
+        need(ca.valueAtTime(0, false).text === '=', 'measures kept'); clean(c, ta); clean(c, tb);
+        return '200 moves, median ' + times[100] + 'ms, p95 ' + times[190] + 'ms, worst ' + times[199] + 'ms | ' + st(c, ta) + ' | ' + st(c, tb);
+    });
+    step('style changes are noticed', function () {
+        var c = comp('style'), t = text(c, lorem), a = area(c); API.install(c, t, [a], []);
+        var ca = doc(c.layer(API.helperNames(t).cache)), o = [], list = [['fontSize', 30], ['tracking', 40], ['leading', 40], ['font', 'Georgia'], ['fauxBold', true], ['fauxItalic', true], ['allCaps', true], ['smallCaps', true], ['baselineShift', 5], ['horizontalScale', 80], ['verticalScale', 80], ['tsume', 50]];
+        for (var i = 0; i < list.length; i++) {
+            var d = doc(t).value, before = d[list[i][0]], seen;
+            try { d[list[i][0]] = list[i][1]; doc(t).setValue(d); seen = ca.valueAtTime(0, false).text !== '='; }
+            catch (e) { seen = 'n/a'; }
+            o.push(list[i][0] + '=' + seen);
+            d = doc(t).value; try { d[list[i][0]] = before; doc(t).setValue(d); } catch (e2) {}
+        }
+        return o.join(' ');
     });
     // E. perf
     function perf(words, vertices) {

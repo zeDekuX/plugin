@@ -111,7 +111,7 @@ var TextAreaCore = (function () {
     function flow(paragraphs,rows,options) {
         var result={placements:[],fragments:[],overflow:[],totalWords:0,placedWords:0,reason:null};
         paragraphs.forEach(function(p){result.totalWords+=p.length;});
-        var rowIndex=0,extraY=0,stop=false;
+        var rowIndex=0,extraY=0,stop=false,squeeze=options.minGap||1;
         for(var p=0;p<paragraphs.length;p++){
             var words=paragraphs[p],wi=0;
             if(!words.length){rowIndex++;extraY+=options.paragraphSpacing||0;continue;}
@@ -120,17 +120,18 @@ var TextAreaCore = (function () {
                 var segments=options.segmentsAt?options.segmentsAt(baseline,row):row.segments;
                 var rowFragments=[];
                 for(var si=0;si<segments.length&&wi<words.length;si++){
-                    var segment=segments[si],width=segment[1]-segment[0],indices=[],used=0;
+                    var segment=segments[si],width=segment[1]-segment[0],indices=[],used=0,tight=0;
+                    // Justified lines may close their gaps down to minGap to fit one more word.
                     while(wi<words.length){var w=words[wi],gap=indices.length?words[wi-1].gapAfter:0;
-                        if(used+gap+w.width>width+EPS)break;
-                        used+=gap+w.width;indices.push(wi++);
+                        if(tight+gap*squeeze+w.width>width+EPS)break;
+                        used+=gap+w.width;tight+=gap*squeeze+w.width;indices.push(wi++);
                     }
                     if(indices.length)rowFragments.push({paragraph:p,row:row.index===undefined?rowIndex-1:row.index,segment:si,left:segment[0],right:segment[1],baseline:baseline,indices:indices,used:used});
                 }
                 var final=wi===words.length;
                 rowFragments.forEach(function(f){
-                    var justify=options.alignment===3&&(!final||options.justifyFinal),spare=Math.max(0,f.right-f.left-f.used);
-                    var add=justify&&f.indices.length>1?spare/(f.indices.length-1):0;
+                    var justify=options.alignment===3&&(!final||options.justifyFinal),room=f.right-f.left-f.used,spare=Math.max(0,room);
+                    var add=(justify||room<0)&&f.indices.length>1?room/(f.indices.length-1):0;
                     var offset=options.alignment===1?spare/2:options.alignment===2?spare:0,x=f.left+offset;
                     f.finalLine=final;f.extraGap=add;
                     f.indices.forEach(function(index,i){

@@ -7,7 +7,7 @@ function atomize(text) {
         var re = /\S+/g, m, tokens = [], end = 0, prev = null;
         while ((m = re.exec(line)) !== null) {
             var gap = line.slice(end, m.index);
-            var atom = { s: m[0], para: p, index: atoms.length, start: offset + m.index, end: offset + m.index + m[0].length };
+            var atom = { s: m[0], gap: gap, para: p, index: atoms.length, start: offset + m.index, end: offset + m.index + m[0].length };
             // Measured string that ends at this atom: previous atom + original
             // gap, or leading whitespace + atom at the start of a line.
             atom.pair = prev ? prev.s + gap + m[0] : gap + m[0];
@@ -23,13 +23,15 @@ function atomize(text) {
     });
     return { atoms: atoms, paragraphs: paragraphs };
 }
-/* The string a measuring slot shows: atom k alone, or ending its measured pair.
+/* The string a measuring slot shows: kind 0 is atom k alone, 1 the pair it ends,
+ * 2 the atom before a space and an H, which reveals its advance.
  * Runs once per slot, so it must stay a single native split, not atomize(). */
-function slotString(text, k, pair) {
+function slotString(text, k, kind) {
     var parts = String(text).replace(/\r\n?/g, '\n').split(/(\s+)/);
     var i = 2 * k + (parts[0] === '' ? 2 : 0), atom = parts[i], gap = parts[i - 1] || '';
     if (atom === undefined || atom === '') return 'Hg';
-    if (!pair) return atom;
+    if (kind === 0) return atom;
+    if (kind === 2) return atom + ' H';
     var lineBreak = gap.lastIndexOf('\n');
     if (i === 0 || i === 1 || parts[i - 2] === '' || lineBreak >= 0) return gap.slice(lineBreak + 1) + atom;
     return parts[i - 2] + gap + atom;

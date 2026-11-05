@@ -6,18 +6,27 @@
     var POSITION = SCALE * 100;    // huge and amount = pixels / SCALE (range +/-100000 px).
     var PARKED = -90000;           // Y offset that takes hidden words out of any comp.
     var ANIM_MOVE = 'TW Posizione', ANIM_COUNT = 'TW Conteggio', ANIM_OLD_HIDE = 'TW Nascondi', CONTROL_TEXT = 'TW Testo';
+    var AUTO_AREA = 'TW Area - ', ORIGINAL_SUFFIX = ' (box originale)';
+    var STYLE_FIELDS = ['font', 'fontSize', 'tracking', 'leading', 'autoLeading', 'applyFill', 'fillColor', 'applyStroke', 'strokeWidth', 'strokeColor', 'strokeOverFill', 'fauxBold', 'fauxItalic', 'allCaps', 'smallCaps', 'horizontalScale', 'verticalScale', 'baselineShift', 'tsume', 'superscript', 'subscript'];
     var STALE = 'Testo cambiato: premi Applica / Aggiorna wrap';
     var BASED_ON_CHARACTERS = 1, BASED_ON_WORDS = 3;
     var EXPR = {
-    "atoms": "/* Splits text into atoms (whitespace-separated runs, NBSP included) and groups\n * them into layout tokens: NBSP-joined atoms must travel as one token. */\nfunction atomize(text) {\n    var lines = String(text).replace(/\\r\\n?/g, '\\n').split('\\n');\n    var atoms = [], paragraphs = [], offset = 0;\n    lines.forEach(function (line, p) {\n        var re = /\\S+/g, m, tokens = [], end = 0, prev = null;\n        while ((m = re.exec(line)) !== null) {\n            var gap = line.slice(end, m.index);\n            var atom = { s: m[0], para: p, index: atoms.length, start: offset + m.index, end: offset + m.index + m[0].length };\n            // Measured string that ends at this atom: previous atom + original\n            // gap, or leading whitespace + atom at the start of a line.\n            atom.pair = prev ? prev.s + gap + m[0] : gap + m[0];\n            atom.prev = prev;\n            if (prev && gap.length && /^[\u00a0\u202f]+$/.test(gap)) tokens[tokens.length - 1].push(atom);\n            else tokens.push([atom]);\n            atoms.push(atom);\n            prev = atom;\n            end = m.index + m[0].length;\n        }\n        paragraphs.push(tokens);\n        offset += line.length + 1;\n    });\n    return { atoms: atoms, paragraphs: paragraphs };\n}\n/* The string a measuring slot shows: atom k alone, or ending its measured pair.\n * Runs once per slot, so it must stay a single native split, not atomize(). */\nfunction slotString(text, k, pair) {\n    var parts = String(text).replace(/\\r\\n?/g, '\\n').split(/(\\s+)/);\n    var i = 2 * k + (parts[0] === '' ? 2 : 0), atom = parts[i], gap = parts[i - 1] || '';\n    if (atom === undefined || atom === '') return 'Hg';\n    if (!pair) return atom;\n    var lineBreak = gap.lastIndexOf('\\n');\n    if (i === 0 || i === 1 || parts[i - 2] === '' || lineBreak >= 0) return gap.slice(lineBreak + 1) + atom;\n    return parts[i - 2] + gap + atom;\n}\n/* String offset of each character as a selector's textIndex counts them, for the\n * Characters mode. Line breaks are not counted; a surrogate pair or a base plus\n * its combining marks is one character. */\nfunction characterOffsets(text) {\n    var normalized = String(text).replace(/\\r\\n?/g, '\\n'), offsets = [], m;\n    var re = /[\\u{1F1E6}-\\u{1F1FF}]{2}|\\P{M}\\p{M}*(?:\\u200d\\P{M}\\p{M}*)*/gu;\n    while ((m = re.exec(normalized)) !== null) if (m[0] !== '\\n') offsets.push(m.index);\n    return offsets;\n}\n",
-    "core": "/* Text Area: pure geometry and layout. Coordinates are Cartesian (+Y up).\n * No temporal state, no glyph synthesis, no word splitting, no font scaling.\n */\nvar TextAreaCore = (function () {\n    'use strict';\n    var EPS = 1e-7;\n    function finite(v, name) { if (!isFinite(v)) throw new Error(name + ' must be finite.'); return v; }\n    function merge(intervals) {\n        var out=[];\n        intervals.sort(function(a,b){return a[0]-b[0];});\n        intervals.forEach(function(s){\n            if(s[1]-s[0]<=EPS)return;\n            var last=out[out.length-1];\n            if(last&&s[0]<=last[1]+EPS)last[1]=Math.max(last[1],s[1]);\n            else out.push(s.slice());\n        });return out;\n    }\n    function subtract(available, blocked) {\n        blocked=merge(blocked);var out=[];\n        available.forEach(function(a){\n            var x=a[0];\n            blocked.forEach(function(b){if(b[1]<=x||b[0]>=a[1])return;if(b[0]>x)out.push([x,Math.min(b[0],a[1])]);x=Math.max(x,b[1]);});\n            if(x<a[1]-EPS)out.push([x,a[1]]);\n        });return out;\n    }\n    function intersect(a,b) {\n        var out=[];a.forEach(function(x){b.forEach(function(y){var l=Math.max(x[0],y[0]),r=Math.min(x[1],y[1]);if(r>l+EPS)out.push([l,r]);});});return merge(out);\n    }\n    function midpoint(a,b){return {x:(a.x+b.x)/2,y:(a.y+b.y)/2};}\n    function distanceToSegment(p,a,b) {\n        var dx=b.x-a.x,dy=b.y-a.y,t=((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1);\n        t=Math.max(0,Math.min(1,t));return Math.hypot(p.x-a.x-t*dx,p.y-a.y-t*dy);\n    }\n    // A Bezier lies within its control polygon's convex hull. The flatness\n    // bound includes distance to the finite chord (also covers loops/cusps).\n    function flatten(data,tolerance) {\n        finite(tolerance,'Curve tolerance');if(tolerance<=0)throw new Error('Curve tolerance must be positive.');\n        var edges=[],cur=null,start=null,open=false,bounds={left:Infinity,right:-Infinity,top:-Infinity,bottom:Infinity};\n        function edge(a,b){\n            [a,b].forEach(function(p){finite(p.x,'Path X');finite(p.y,'Path Y');bounds.left=Math.min(bounds.left,p.x);bounds.right=Math.max(bounds.right,p.x);bounds.top=Math.max(bounds.top,p.y);bounds.bottom=Math.min(bounds.bottom,p.y);});\n            edges.push([a,b]);if(edges.length>200000)throw new Error('Area is too complex (200000 edge limit).');\n        }\n        function bezier(points,depth){\n            var flat=true;\n            for(var i=1;i<points.length-1;i++)if(distanceToSegment(points[i],points[0],points[points.length-1])>tolerance)flat=false;\n            if(flat){edge(points[0],points[points.length-1]);return;}\n            if(depth>=24)throw new Error('Area curve subdivision limit reached.');\n            var levels=[points],left=[points[0]],right=[points[points.length-1]];\n            while(levels[levels.length-1].length>1){var p=levels[levels.length-1],q=[];for(var k=0;k<p.length-1;k++)q.push(midpoint(p[k],p[k+1]));levels.push(q);left.push(q[0]);right.push(q[q.length-1]);}\n            bezier(left,depth+1);bezier(right.reverse(),depth+1);\n        }\n        function rational(h,depth){\n            var p=h.map(function(v){return {x:v.x/v.w,y:v.y/v.w};});\n            if(distanceToSegment(p[1],p[0],p[2])<=tolerance){edge(p[0],p[2]);return;}\n            if(depth>=24)throw new Error('Area conic subdivision limit reached.');\n            function half(a,b){return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,w:(a.w+b.w)/2};}\n            var a=half(h[0],h[1]),b=half(h[1],h[2]),c=half(a,b);\n            rational([h[0],a,c],depth+1);rational([c,b,h[2]],depth+1);\n        }\n        data.forEach(function(v){\n            if(v.type==='moveTo'){if(open)throw new Error('Area must contain closed contours.');cur=v.point;start=cur;open=true;}\n            else if(v.type==='close'){if(open)edge(cur,start);open=false;cur=start;}\n            else {\n                if(!open)throw new Error('Malformed Area contour.');\n                if(v.type==='lineTo')edge(cur,v.point);\n                else if(v.type==='quadTo')bezier([cur,v.cp1,v.point],0);\n                else if(v.type==='cubicTo')bezier([cur,v.cp1,v.cp2,v.point],0);\n                else if(v.type==='conicTo'){\n                    finite(v.weight,'Conic weight');if(v.weight<0)throw new Error('Negative conic weights are unsupported. Convert to Bezier curves first.');\n                    if(v.weight===0)edge(cur,v.point);\n                    else rational([{x:cur.x,y:cur.y,w:1},{x:v.cp1.x*v.weight,y:v.cp1.y*v.weight,w:v.weight},{x:v.point.x,y:v.point.y,w:1}],0);\n                }\n                else throw new Error('Unsupported Area path verb: '+v.type+'. Convert to Bezier curves first.');\n                cur=v.point;\n            }\n        });if(open)throw new Error('Area must contain closed contours.');return {edges:edges,bounds:bounds};\n    }\n    function scanIntervals(edges,y,contains) {\n        var xs=[];\n        edges.forEach(function(e){var a=e[0],b=e[1];if((a.y>y)!==(b.y>y))xs.push(a.x+(y-a.y)*(b.x-a.x)/(b.y-a.y));});\n        xs.sort(function(a,b){return a-b;});var out=[];\n        for(var i=0;i<xs.length-1;i++)if(xs[i+1]-xs[i]>EPS&&contains((xs[i]+xs[i+1])/2,y))out.push([xs[i],xs[i+1]]);\n        return merge(out);\n    }\n    // Project ALL boundary edges in the expanded row band onto X and remove\n    // their projections from the midpoint interior intervals. A remaining\n    // rectangle has no boundary anywhere in its height, including tiny holes.\n    // Expanding by curve tolerance keeps the test conservative for curves.\n    function bandSegments(geometry,top,bottom,padding,tolerance,contains) {\n        finite(padding,'Padding');if(padding<0)throw new Error('Padding must be nonnegative.');\n        var safety=padding+tolerance,hi=top+safety-EPS,lo=bottom-safety+EPS,mid=(top+bottom)/2;\n        var available=scanIntervals(geometry.edges,mid,contains),blocked=[];\n        geometry.edges.forEach(function(e){\n            var a=e[0],b=e[1],min=Math.min(a.y,b.y),max=Math.max(a.y,b.y);\n            if(max<lo||min>hi)return;\n            var x1=a.x,x2=b.x;\n            if(Math.abs(b.y-a.y)>EPS){\n                var t1=Math.max(0,Math.min(1,(lo-a.y)/(b.y-a.y))),t2=Math.max(0,Math.min(1,(hi-a.y)/(b.y-a.y)));\n                var tl=Math.min(t1,t2),tr=Math.max(t1,t2);x1=a.x+(b.x-a.x)*tl;x2=a.x+(b.x-a.x)*tr;\n            }\n            blocked.push([Math.min(x1,x2)-safety,Math.max(x1,x2)+safety]);\n        });return subtract(available,blocked);\n    }\n    function tokens(text) {\n        // NBSP/narrow NBSP stay inside a logical word. Ordinary whitespace is\n        // a break opportunity; original inter-word gaps come from native text.\n        return String(text).replace(/\\r\\n?/g,'\\n').split('\\n').map(function(line){\n            return line.split(/[\\t\\v\\f \\u1680\\u2000-\\u200a\\u2028\\u2029\\u205f\\u3000]+/).filter(function(w){return w.length>0;});\n        });\n    }\n    function flow(paragraphs,rows,options) {\n        var result={placements:[],fragments:[],overflow:[],totalWords:0,placedWords:0,reason:null};\n        paragraphs.forEach(function(p){result.totalWords+=p.length;});\n        var rowIndex=0,extraY=0,stop=false;\n        for(var p=0;p<paragraphs.length;p++){\n            var words=paragraphs[p],wi=0;\n            if(!words.length){rowIndex++;extraY+=options.paragraphSpacing||0;continue;}\n            while(wi<words.length&&rowIndex<rows.length){\n                var row=rows[rowIndex++],baseline=row.baseline-extraY;\n                var segments=options.segmentsAt?options.segmentsAt(baseline,row):row.segments;\n                var rowFragments=[];\n                for(var si=0;si<segments.length&&wi<words.length;si++){\n                    var segment=segments[si],width=segment[1]-segment[0],indices=[],used=0;\n                    while(wi<words.length){var w=words[wi],gap=indices.length?words[wi-1].gapAfter:0;\n                        if(used+gap+w.width>width+EPS)break;\n                        used+=gap+w.width;indices.push(wi++);\n                    }\n                    if(indices.length)rowFragments.push({paragraph:p,row:row.index===undefined?rowIndex-1:row.index,segment:si,left:segment[0],right:segment[1],baseline:baseline,indices:indices,used:used});\n                }\n                var final=wi===words.length;\n                rowFragments.forEach(function(f){\n                    var justify=options.alignment===3&&(!final||options.justifyFinal),spare=Math.max(0,f.right-f.left-f.used);\n                    var add=justify&&f.indices.length>1?spare/(f.indices.length-1):0;\n                    var offset=options.alignment===1?spare/2:options.alignment===2?spare:0,x=f.left+offset;\n                    f.finalLine=final;f.extraGap=add;\n                    f.indices.forEach(function(index,i){\n                        var w=words[index];result.placements.push({paragraph:p,word:index,token:w.token,key:w.key,x:x,baseline:f.baseline,width:w.width,row:f.row,segment:f.segment});\n                        x+=w.width+(i<f.indices.length-1?w.gapAfter+add:0);\n                    });result.fragments.push(f);\n                });\n            }\n            if(wi<words.length){\n                for(var q=p;q<paragraphs.length;q++)for(var j=q===p?wi:0;j<paragraphs[q].length;j++)result.overflow.push({paragraph:q,word:j,token:paragraphs[q][j].token});\n                result.reason='Text does not fit the remaining row segments; flow stops at the first unplaced whole word.';stop=true;break;\n            }\n            extraY+=options.paragraphSpacing||0;\n        }\n        result.placedWords=result.placements.length;\n        if(stop&&options.overflowPolicy===1)throw new Error('Text Area overflow: '+result.overflow.length+' words remain, beginning with \"'+result.overflow[0].token+'\".');\n        return result;\n    }\n    return {merge:merge,intersect:intersect,subtract:subtract,flatten:flatten,bandSegments:bandSegments,tokens:tokens,flow:flow};\n})();\n",
-    "metrics": "/* Source Text of the metrics layer. Time is used as an address: slot N shows\n * string N, so a single hidden layer can measure every word through\n * sourceRectAtTime(N * frameDuration). */\nvar src = __SRC__.text.sourceText;\nvar slot = Math.round(time / thisComp.frameDuration);\nvar shown = 'Hg';\nif (slot === 1) shown = 'Hg\\rHg';\nelse if (slot === 2 || slot === 3) shown = src.valueAtTime(0).toString();\nelse if (slot > 3) shown = slotString(src.valueAtTime(0).toString(), Math.floor((slot - 4) / 2), slot % 2 === 1);\nsrc.style.setText(shown);\n",
-    "cache": "/* Source Text of the cache layer: everything that depends only on the text and\n * its style. AE keeps the result across frames, but any edit in the comp re-runs\n * this expression, so dragging a shape would measure every word on each mouse\n * move. The panel stores the result as the own text of this layer and of the\n * engine. While it still matches, this outputs only '=' and the engine uses its\n * copy: even returning the long string unchanged costs AE more than the layout. */\nvar source = __SRC__.text.sourceText.valueAtTime(0).toString();\nvar metrics = thisComp.layer(__METRICS__), frame = thisComp.frameDuration, memo = Object.create(null);\nfunction measure(slot, key) {\n    if (!memo[key]) {\n        var r = metrics.sourceRectAtTime(slot * frame, false);\n        memo[key] = { left: r.left, top: r.top, width: r.width, height: r.height };\n    }\n    return memo[key];\n}\nvar one = measure(0, 'Hg'), two = measure(1, 'Hg\\rHg');\n// Every word is measured with the style of the source, so these two cheap rects\n// and the string are enough to notice anything that would change the result.\nvar identity = JSON.stringify([one, two, __BY_WORDS__, source]);\nfunction stored() {\n    try { return JSON.parse(value.toString()).identity === identity; } catch (e) { return false; }\n}\nfunction measured() {\n    var text = atomize(source);\n    // Slot 3 lifts the whole text by 10 px per word AE counts (see the metrics\n    // layer's animator), which is the only way to read AE's own word count.\n    var aeWords = Math.round((measure(2, '\\u0000plain').top - measure(3, '\\u0000lifted').top) / 10);\n    var ascent = -one.top, descent = -(one.top + one.height);\n    text.atoms.forEach(function (atom, k) {\n        var own = measure(4 + 2 * k, atom.s), pair = measure(5 + 2 * k, atom.pair);\n        // Rects are relative to the start of the measured string, which is the\n        // previous atom's origin. Glyphless atoms make ink edges unreliable.\n        atom.right = (atom.prev ? atom.prev.origin : 0) + pair.left + pair.width;\n        atom.left = atom.right - own.width;\n        atom.origin = atom.left - own.left;\n        atom.ink = own.width > 0;\n        ascent = Math.max(ascent, -own.top);\n        descent = Math.min(descent, -(own.top + own.height));\n    });\n    var lefts = [], key = 0;\n    var paragraphs = text.paragraphs.map(function (group) {\n        var words = group.map(function (atoms) {\n            var left = atoms[0].left, right = atoms[atoms.length - 1].right;\n            atoms.forEach(function (a) { a.token = key; });\n            lefts.push(left);\n            return { token: atoms.map(function (a) { return a.s; }).join(' '), key: key++, width: right - left, left: left, right: right, gapAfter: 0 };\n        });\n        for (var w = 0; w < words.length - 1; w++) words[w].gapAfter = Math.max(0, words[w + 1].left - words[w].right);\n        return words.map(function (v) { return { token: v.token, key: v.key, width: v.width, gapAfter: v.gapAfter }; });\n    });\n    // Token of each selector index. AE does not count a glyphless character as a\n    // word; anything else that disagrees is reported as stale so the panel can fall\n    // back to Characters, which is slower but always exact.\n    var order;\n    if (__BY_WORDS__) order = text.atoms.filter(function (a) { return a.ink; }).map(function (a) { return a.token; });\n    else {\n        var next = 0;\n        order = characterOffsets(source).map(function (offset) {\n            while (next < text.atoms.length && text.atoms[next].end <= offset) next++;\n            var atom = text.atoms[next];\n            return atom && offset >= atom.start ? atom.token : -1;\n        });\n    }\n    return JSON.stringify({ pitch: two.height - one.height, ascent: ascent, descent: descent, paragraphs: paragraphs, lefts: lefts, order: order, words: order.length, stale: __BY_WORDS__ && aeWords !== order.length, identity: identity });\n}\nstored() ? '=' : measured();\n",
-    "engine": "/* Source Text of the engine layer: one layout per frame, read by the selector.\n * Output: one 12-character record per selector index, \\r, a status line. The\n * fixed width lets each evaluation read its record without parsing the rest.\n * The core is Cartesian (+Y up), so every Y is negated at this boundary. */\nvar SRC = __SRC__;\nvar KAPPA = 0.5522847498;\nfunction control(name) { return SRC.effect(name)(1).value; }\n// Two 6-digit base-36 fields: hundredths of a pixel, biased to stay positive.\nfunction field(v) { return ('00000' + (Math.round(v * 100) + 1e9).toString(36)).slice(-6); }\nfunction encode(dx, dy) { return field(dx) + field(dy); }\n\nfunction mapper(layer, chain) {\n    var o = SRC.fromComp(layer.toComp([0, 0, 0]));\n    var a = SRC.fromComp(layer.toComp([1, 0, 0]));\n    var b = SRC.fromComp(layer.toComp([0, 1, 0]));\n    var groups = chain.map(function (t) {\n        var angle = t.rotation.value * Math.PI / 180, sc = t.scale.value;\n        return { an: t.anchorPoint.value, po: t.position.value, sx: sc[0] / 100, sy: sc[1] / 100, c: Math.cos(angle), s: Math.sin(angle) };\n    });\n    return function (x, y) {\n        groups.forEach(function (g) {\n            var px = (x - g.an[0]) * g.sx, py = (y - g.an[1]) * g.sy;\n            x = g.po[0] + px * g.c - py * g.s;\n            y = g.po[1] + px * g.s + py * g.c;\n        });\n        return {\n            x: o[0] + (a[0] - o[0]) * x + (b[0] - o[0]) * y,\n            y: -(o[1] + (a[1] - o[1]) * x + (b[1] - o[1]) * y)\n        };\n    };\n}\nfunction polygon(region, map, points) {\n    points.forEach(function (p, i) {\n        region.data.push({ type: i ? 'lineTo' : 'moveTo', point: map(p[0], p[1]) });\n    });\n    region.data.push({ type: 'close' });\n}\nfunction bezierPath(region, map, pts, ins, outs) {\n    if (!pts.length) return;\n    region.data.push({ type: 'moveTo', point: map(pts[0][0], pts[0][1]) });\n    for (var i = 0; i < pts.length; i++) {\n        var a = pts[i], b = pts[(i + 1) % pts.length], oa = outs[i], ib = ins[(i + 1) % pts.length];\n        region.data.push({ type: 'cubicTo', cp1: map(a[0] + oa[0], a[1] + oa[1]), cp2: map(b[0] + ib[0], b[1] + ib[1]), point: map(b[0], b[1]) });\n    }\n    region.data.push({ type: 'close' });\n}\nfunction addPath(region, layer, chain, path) {\n    bezierPath(region, mapper(layer, chain), path.points(), path.inTangents(), path.outTangents());\n}\nfunction addEllipse(region, layer, chain, shape) {\n    var c = shape.position.value, rx = shape.size.value[0] / 2, ry = shape.size.value[1] / 2, kx = rx * KAPPA, ky = ry * KAPPA;\n    bezierPath(region, mapper(layer, chain),\n        [[c[0], c[1] - ry], [c[0] + rx, c[1]], [c[0], c[1] + ry], [c[0] - rx, c[1]]],\n        [[-kx, 0], [0, -ky], [kx, 0], [0, ky]],\n        [[kx, 0], [0, ky], [-kx, 0], [0, -ky]]);\n}\nfunction addRect(region, layer, chain, shape) {\n    var c = shape.position.value, w = shape.size.value[0] / 2, h = shape.size.value[1] / 2;\n    var r = Math.min(shape.roundness.value, w, h), k = r * KAPPA, l = c[0] - w, t = c[1] - h, R = c[0] + w, B = c[1] + h, map = mapper(layer, chain);\n    if (r <= 0) { polygon(region, map, [[l, t], [R, t], [R, B], [l, B]]); return; }\n    bezierPath(region, map,\n        [[l + r, t], [R - r, t], [R, t + r], [R, B - r], [R - r, B], [l + r, B], [l, B - r], [l, t + r]],\n        [[-k, 0], [0, 0], [0, -k], [0, 0], [k, 0], [0, 0], [0, k], [0, 0]],\n        [[0, 0], [k, 0], [0, 0], [0, k], [0, 0], [-k, 0], [0, 0], [0, -k]]);\n}\nfunction addStar(region, layer, chain, shape) {\n    var c = shape.position.value, n = Math.round(shape.points.value), isStar = shape.type.value === 1;\n    var outer = shape.outerRadius.value, inner = isStar ? shape.innerRadius.value : outer;\n    var start = (shape.rotation.value - 90) * Math.PI / 180, steps = isStar ? n * 2 : n, pts = [];\n    for (var i = 0; i < steps; i++) {\n        var r = (isStar && i % 2) ? inner : outer, angle = start + i * 2 * Math.PI / steps;\n        pts.push([c[0] + r * Math.cos(angle), c[1] + r * Math.sin(angle)]);\n    }\n    polygon(region, mapper(layer, chain), pts);\n}\nfunction addBounds(region, layer) {\n    var r = layer.sourceRectAtTime(time, false), l = r.left, t = r.top, R = l + r.width, B = t + r.height;\n    polygon(region, mapper(layer, []), [[l, t], [R, t], [R, B], [l, B]]);\n}\nfunction inRegion(region, x, y) {\n    var inside = false;\n    region.edges.forEach(function (e) {\n        var a = e[0], b = e[1];\n        if ((a.y > y) !== (b.y > y) && x < a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)) inside = !inside;\n    });\n    return inside;\n}\nfunction layout() {\n    var AREA = [], EXCLUSIONS = [];\n    /*@@REGIONS@@*/\n    var padding = control('TW Padding'), tolerance = Math.max(0.001, control('TW Tolleranza curve'));\n    var alignment = control('TW Allineamento') - 1, justifyFinal = control('TW Giustifica ultima riga') > 0, suppress = control('TW Overflow') === 2;\n    var lineSpacing = control('TW Interlinea extra'), paragraphSpacing = control('TW Spazio paragrafi');\n\n    var cached = thisComp.layer(__CACHE__).text.sourceText.valueAtTime(0).toString();\n    var text = JSON.parse(cached === '=' ? value.toString() : cached);\n    var pitch = text.pitch, ascent = text.ascent, descent = text.descent, rowPitch = pitch + lineSpacing;\n    if (!(rowPitch > 0)) throw new Error('interlinea non positiva.');\n\n    var edges = [], bounds = { top: -Infinity, bottom: Infinity };\n    AREA.concat(EXCLUSIONS).forEach(function (region) {\n        var flat = TextAreaCore.flatten(region.data, tolerance);\n        region.edges = flat.edges;\n        edges = edges.concat(flat.edges);\n        if (AREA.indexOf(region) >= 0) {\n            bounds.top = Math.max(bounds.top, flat.bounds.top);\n            bounds.bottom = Math.min(bounds.bottom, flat.bounds.bottom);\n        }\n    });\n    if (!isFinite(bounds.top)) throw new Error('area vuota.');\n\n    var rows = [], first = bounds.top - padding - tolerance - ascent, last = bounds.bottom + padding + tolerance - descent;\n    for (var y = first; y >= last - 1e-7; y -= rowPitch) {\n        if (rows.length >= 2000) throw new Error('limite di 2000 righe raggiunto.');\n        rows.push({ index: rows.length, baseline: y });\n    }\n    function allowed(x, y) {\n        return AREA.some(function (r) { return inRegion(r, x, y); }) && !EXCLUSIONS.some(function (r) { return inRegion(r, x, y); });\n    }\n    var flowed = TextAreaCore.flow(text.paragraphs, rows, {\n        alignment: alignment, justifyFinal: justifyFinal, paragraphSpacing: paragraphSpacing, overflowPolicy: 0,\n        segmentsAt: function (baseline) { return TextAreaCore.bandSegments({ edges: edges }, baseline + ascent, baseline + descent, padding, tolerance, allowed); }\n    });\n\n    var hideAll = suppress && flowed.overflow.length > 0;\n    // Unplaced words are parked off screen: a second animator just to hide them\n    // would double the per-word cost.\n    var parked = encode(0, __PARKED__), still = encode(0, 0);\n    var cells = text.lefts.map(function () { return parked; });\n    if (!hideAll) flowed.placements.forEach(function (v) {\n        cells[v.key] = encode(v.x - text.lefts[v.key], -v.baseline - v.paragraph * pitch);\n    });\n    var status = flowed.overflow.length\n        ? 'OVERFLOW: ' + flowed.overflow.length + ' parole escluse, prima: ' + flowed.overflow[0].token\n        : 'OK: ' + flowed.placedWords + ' parole disposte';\n    if (text.stale) status = __STALE__;\n    return text.order.map(function (token) { return token < 0 ? still : cells[token]; }).join('') + '\\r' + status;\n}\nvar result;\ntry { result = layout(); } catch (e) { result = '\\rERRORE: ' + e.message; }\nresult;\n",
-    "selector": "var r = thisComp.layer(__ENGINE__).text.sourceText.value.toString().substr((textIndex - 1) * 12, 12);\nvar dx = parseInt(r.substr(0, 6), 36), dy = parseInt(r.substr(6, 6), 36);\n// A short or missing record means the engine failed: park the word.\nr.length === 12 && r.indexOf('\\r') < 0 ? [(dx - 1e9) / (100 * __SCALE__), (dy - 1e9) / (100 * __SCALE__), 0] : [0, __PARKED__ / __SCALE__, 0];\n",
+    "atoms": "/* Splits text into atoms (whitespace-separated runs, NBSP included) and groups\n * them into layout tokens: NBSP-joined atoms must travel as one token. */\nfunction atomize(text) {\n    var lines = String(text).replace(/\\r\\n?/g, '\\n').split('\\n');\n    var atoms = [], paragraphs = [], offset = 0;\n    lines.forEach(function (line, p) {\n        var re = /\\S+/g, m, tokens = [], end = 0, prev = null;\n        while ((m = re.exec(line)) !== null) {\n            var gap = line.slice(end, m.index);\n            var atom = { s: m[0], gap: gap, para: p, index: atoms.length, start: offset + m.index, end: offset + m.index + m[0].length };\n            // Measured string that ends at this atom: previous atom + original\n            // gap, or leading whitespace + atom at the start of a line.\n            atom.pair = prev ? prev.s + gap + m[0] : gap + m[0];\n            atom.prev = prev;\n            if (prev && gap.length && /^[\u00a0\u202f]+$/.test(gap)) tokens[tokens.length - 1].push(atom);\n            else tokens.push([atom]);\n            atoms.push(atom);\n            prev = atom;\n            end = m.index + m[0].length;\n        }\n        paragraphs.push(tokens);\n        offset += line.length + 1;\n    });\n    return { atoms: atoms, paragraphs: paragraphs };\n}\n/* The string a measuring slot shows: kind 0 is atom k alone, 1 the pair it ends,\n * 2 the atom before a space and an H, which reveals its advance.\n * Runs once per slot, so it must stay a single native split, not atomize(). */\nfunction slotString(text, k, kind) {\n    var parts = String(text).replace(/\\r\\n?/g, '\\n').split(/(\\s+)/);\n    var i = 2 * k + (parts[0] === '' ? 2 : 0), atom = parts[i], gap = parts[i - 1] || '';\n    if (atom === undefined || atom === '') return 'Hg';\n    if (kind === 0) return atom;\n    if (kind === 2) return atom + ' H';\n    var lineBreak = gap.lastIndexOf('\\n');\n    if (i === 0 || i === 1 || parts[i - 2] === '' || lineBreak >= 0) return gap.slice(lineBreak + 1) + atom;\n    return parts[i - 2] + gap + atom;\n}\n/* String offset of each character as a selector's textIndex counts them, for the\n * Characters mode. Line breaks are not counted; a surrogate pair or a base plus\n * its combining marks is one character. */\nfunction characterOffsets(text) {\n    var normalized = String(text).replace(/\\r\\n?/g, '\\n'), offsets = [], m;\n    var re = /[\\u{1F1E6}-\\u{1F1FF}]{2}|\\P{M}\\p{M}*(?:\\u200d\\P{M}\\p{M}*)*/gu;\n    while ((m = re.exec(normalized)) !== null) if (m[0] !== '\\n') offsets.push(m.index);\n    return offsets;\n}\n",
+    "core": "/* Text Area: pure geometry and layout. Coordinates are Cartesian (+Y up).\n * No temporal state, no glyph synthesis, no word splitting, no font scaling.\n */\nvar TextAreaCore = (function () {\n    'use strict';\n    var EPS = 1e-7;\n    function finite(v, name) { if (!isFinite(v)) throw new Error(name + ' must be finite.'); return v; }\n    function merge(intervals) {\n        var out=[];\n        intervals.sort(function(a,b){return a[0]-b[0];});\n        intervals.forEach(function(s){\n            if(s[1]-s[0]<=EPS)return;\n            var last=out[out.length-1];\n            if(last&&s[0]<=last[1]+EPS)last[1]=Math.max(last[1],s[1]);\n            else out.push(s.slice());\n        });return out;\n    }\n    function subtract(available, blocked) {\n        blocked=merge(blocked);var out=[];\n        available.forEach(function(a){\n            var x=a[0];\n            blocked.forEach(function(b){if(b[1]<=x||b[0]>=a[1])return;if(b[0]>x)out.push([x,Math.min(b[0],a[1])]);x=Math.max(x,b[1]);});\n            if(x<a[1]-EPS)out.push([x,a[1]]);\n        });return out;\n    }\n    function intersect(a,b) {\n        var out=[];a.forEach(function(x){b.forEach(function(y){var l=Math.max(x[0],y[0]),r=Math.min(x[1],y[1]);if(r>l+EPS)out.push([l,r]);});});return merge(out);\n    }\n    function midpoint(a,b){return {x:(a.x+b.x)/2,y:(a.y+b.y)/2};}\n    function distanceToSegment(p,a,b) {\n        var dx=b.x-a.x,dy=b.y-a.y,t=((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1);\n        t=Math.max(0,Math.min(1,t));return Math.hypot(p.x-a.x-t*dx,p.y-a.y-t*dy);\n    }\n    // A Bezier lies within its control polygon's convex hull. The flatness\n    // bound includes distance to the finite chord (also covers loops/cusps).\n    function flatten(data,tolerance) {\n        finite(tolerance,'Curve tolerance');if(tolerance<=0)throw new Error('Curve tolerance must be positive.');\n        var edges=[],cur=null,start=null,open=false,bounds={left:Infinity,right:-Infinity,top:-Infinity,bottom:Infinity};\n        function edge(a,b){\n            [a,b].forEach(function(p){finite(p.x,'Path X');finite(p.y,'Path Y');bounds.left=Math.min(bounds.left,p.x);bounds.right=Math.max(bounds.right,p.x);bounds.top=Math.max(bounds.top,p.y);bounds.bottom=Math.min(bounds.bottom,p.y);});\n            edges.push([a,b]);if(edges.length>200000)throw new Error('Area is too complex (200000 edge limit).');\n        }\n        function bezier(points,depth){\n            var flat=true;\n            for(var i=1;i<points.length-1;i++)if(distanceToSegment(points[i],points[0],points[points.length-1])>tolerance)flat=false;\n            if(flat){edge(points[0],points[points.length-1]);return;}\n            if(depth>=24)throw new Error('Area curve subdivision limit reached.');\n            var levels=[points],left=[points[0]],right=[points[points.length-1]];\n            while(levels[levels.length-1].length>1){var p=levels[levels.length-1],q=[];for(var k=0;k<p.length-1;k++)q.push(midpoint(p[k],p[k+1]));levels.push(q);left.push(q[0]);right.push(q[q.length-1]);}\n            bezier(left,depth+1);bezier(right.reverse(),depth+1);\n        }\n        function rational(h,depth){\n            var p=h.map(function(v){return {x:v.x/v.w,y:v.y/v.w};});\n            if(distanceToSegment(p[1],p[0],p[2])<=tolerance){edge(p[0],p[2]);return;}\n            if(depth>=24)throw new Error('Area conic subdivision limit reached.');\n            function half(a,b){return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,w:(a.w+b.w)/2};}\n            var a=half(h[0],h[1]),b=half(h[1],h[2]),c=half(a,b);\n            rational([h[0],a,c],depth+1);rational([c,b,h[2]],depth+1);\n        }\n        data.forEach(function(v){\n            if(v.type==='moveTo'){if(open)throw new Error('Area must contain closed contours.');cur=v.point;start=cur;open=true;}\n            else if(v.type==='close'){if(open)edge(cur,start);open=false;cur=start;}\n            else {\n                if(!open)throw new Error('Malformed Area contour.');\n                if(v.type==='lineTo')edge(cur,v.point);\n                else if(v.type==='quadTo')bezier([cur,v.cp1,v.point],0);\n                else if(v.type==='cubicTo')bezier([cur,v.cp1,v.cp2,v.point],0);\n                else if(v.type==='conicTo'){\n                    finite(v.weight,'Conic weight');if(v.weight<0)throw new Error('Negative conic weights are unsupported. Convert to Bezier curves first.');\n                    if(v.weight===0)edge(cur,v.point);\n                    else rational([{x:cur.x,y:cur.y,w:1},{x:v.cp1.x*v.weight,y:v.cp1.y*v.weight,w:v.weight},{x:v.point.x,y:v.point.y,w:1}],0);\n                }\n                else throw new Error('Unsupported Area path verb: '+v.type+'. Convert to Bezier curves first.');\n                cur=v.point;\n            }\n        });if(open)throw new Error('Area must contain closed contours.');return {edges:edges,bounds:bounds};\n    }\n    function scanIntervals(edges,y,contains) {\n        var xs=[];\n        edges.forEach(function(e){var a=e[0],b=e[1];if((a.y>y)!==(b.y>y))xs.push(a.x+(y-a.y)*(b.x-a.x)/(b.y-a.y));});\n        xs.sort(function(a,b){return a-b;});var out=[];\n        for(var i=0;i<xs.length-1;i++)if(xs[i+1]-xs[i]>EPS&&contains((xs[i]+xs[i+1])/2,y))out.push([xs[i],xs[i+1]]);\n        return merge(out);\n    }\n    // Project ALL boundary edges in the expanded row band onto X and remove\n    // their projections from the midpoint interior intervals. A remaining\n    // rectangle has no boundary anywhere in its height, including tiny holes.\n    // Expanding by curve tolerance keeps the test conservative for curves.\n    function bandSegments(geometry,top,bottom,padding,tolerance,contains) {\n        finite(padding,'Padding');if(padding<0)throw new Error('Padding must be nonnegative.');\n        var safety=padding+tolerance,hi=top+safety-EPS,lo=bottom-safety+EPS,mid=(top+bottom)/2;\n        var available=scanIntervals(geometry.edges,mid,contains),blocked=[];\n        geometry.edges.forEach(function(e){\n            var a=e[0],b=e[1],min=Math.min(a.y,b.y),max=Math.max(a.y,b.y);\n            if(max<lo||min>hi)return;\n            var x1=a.x,x2=b.x;\n            if(Math.abs(b.y-a.y)>EPS){\n                var t1=Math.max(0,Math.min(1,(lo-a.y)/(b.y-a.y))),t2=Math.max(0,Math.min(1,(hi-a.y)/(b.y-a.y)));\n                var tl=Math.min(t1,t2),tr=Math.max(t1,t2);x1=a.x+(b.x-a.x)*tl;x2=a.x+(b.x-a.x)*tr;\n            }\n            blocked.push([Math.min(x1,x2)-safety,Math.max(x1,x2)+safety]);\n        });return subtract(available,blocked);\n    }\n    function tokens(text) {\n        // NBSP/narrow NBSP stay inside a logical word. Ordinary whitespace is\n        // a break opportunity; original inter-word gaps come from native text.\n        return String(text).replace(/\\r\\n?/g,'\\n').split('\\n').map(function(line){\n            return line.split(/[\\t\\v\\f \\u1680\\u2000-\\u200a\\u2028\\u2029\\u205f\\u3000]+/).filter(function(w){return w.length>0;});\n        });\n    }\n    function flow(paragraphs,rows,options) {\n        var result={placements:[],fragments:[],overflow:[],totalWords:0,placedWords:0,reason:null};\n        paragraphs.forEach(function(p){result.totalWords+=p.length;});\n        var rowIndex=0,extraY=0,stop=false,squeeze=options.minGap||1;\n        for(var p=0;p<paragraphs.length;p++){\n            var words=paragraphs[p],wi=0;\n            if(!words.length){rowIndex++;extraY+=options.paragraphSpacing||0;continue;}\n            while(wi<words.length&&rowIndex<rows.length){\n                var row=rows[rowIndex++],baseline=row.baseline-extraY;\n                var segments=options.segmentsAt?options.segmentsAt(baseline,row):row.segments;\n                var rowFragments=[];\n                for(var si=0;si<segments.length&&wi<words.length;si++){\n                    var segment=segments[si],width=segment[1]-segment[0],indices=[],used=0,tight=0;\n                    // Justified lines may close their gaps down to minGap to fit one more word.\n                    while(wi<words.length){var w=words[wi],gap=indices.length?words[wi-1].gapAfter:0;\n                        if(tight+gap*squeeze+w.width>width+EPS)break;\n                        used+=gap+w.width;tight+=gap*squeeze+w.width;indices.push(wi++);\n                    }\n                    if(indices.length)rowFragments.push({paragraph:p,row:row.index===undefined?rowIndex-1:row.index,segment:si,left:segment[0],right:segment[1],baseline:baseline,indices:indices,used:used});\n                }\n                var final=wi===words.length;\n                rowFragments.forEach(function(f){\n                    var justify=options.alignment===3&&(!final||options.justifyFinal),room=f.right-f.left-f.used,spare=Math.max(0,room);\n                    var add=(justify||room<0)&&f.indices.length>1?room/(f.indices.length-1):0;\n                    var offset=options.alignment===1?spare/2:options.alignment===2?spare:0,x=f.left+offset;\n                    f.finalLine=final;f.extraGap=add;\n                    f.indices.forEach(function(index,i){\n                        var w=words[index];result.placements.push({paragraph:p,word:index,token:w.token,key:w.key,x:x,baseline:f.baseline,width:w.width,row:f.row,segment:f.segment});\n                        x+=w.width+(i<f.indices.length-1?w.gapAfter+add:0);\n                    });result.fragments.push(f);\n                });\n            }\n            if(wi<words.length){\n                for(var q=p;q<paragraphs.length;q++)for(var j=q===p?wi:0;j<paragraphs[q].length;j++)result.overflow.push({paragraph:q,word:j,token:paragraphs[q][j].token});\n                result.reason='Text does not fit the remaining row segments; flow stops at the first unplaced whole word.';stop=true;break;\n            }\n            extraY+=options.paragraphSpacing||0;\n        }\n        result.placedWords=result.placements.length;\n        if(stop&&options.overflowPolicy===1)throw new Error('Text Area overflow: '+result.overflow.length+' words remain, beginning with \"'+result.overflow[0].token+'\".');\n        return result;\n    }\n    return {merge:merge,intersect:intersect,subtract:subtract,flatten:flatten,bandSegments:bandSegments,tokens:tokens,flow:flow};\n})();\n",
+    "metrics": "/* Source Text of the metrics layer. Time is used as an address: slot N shows\n * string N, so a single hidden layer can measure every word through\n * sourceRectAtTime(N * frameDuration). */\nvar src = __SRC__.text.sourceText;\nvar slot = Math.round(time / thisComp.frameDuration);\nvar shown = 'Hg';\nif (slot === 1) shown = 'Hg\\rHg';\nelse if (slot === 2 || slot === 3) shown = src.valueAtTime(0).toString();\nelse if (slot === 4) shown = 'H';\nelse if (slot === 5) shown = 'H H';\nelse if (slot === 6) shown = 'H         H';\nelse if (slot > 6) shown = slotString(src.valueAtTime(0).toString(), Math.floor((slot - 7) / 3), (slot - 7) % 3);\nsrc.style.setText(shown);\n",
+    "cache": "/* Source Text of the cache layer: everything that depends only on the text and\n * its style. AE keeps the result across frames, but any edit in the comp re-runs\n * this expression, so dragging a shape would measure every word on each mouse\n * move. The panel stores the result as the own text of this layer and of the\n * engine. While it still matches, this outputs only '=' and the engine uses its\n * copy: even returning the long string unchanged costs AE more than the layout. */\nvar sourceText = __SRC__.text.sourceText, source = sourceText.valueAtTime(0).toString();\n// Every word is measured with the style of the source, so the string and its style\n// are enough to notice what would change the result. They must be read directly:\n// asking the metrics layer costs more than the whole layout of a drag step.\nfunction styleKey() {\n    var style = sourceText.style;\n    return ['font', 'fontSize', 'tracking', 'leading', 'autoLeading', 'baselineShift', 'isFauxBold', 'isFauxItalic', 'isAllCaps', 'isSmallCaps', 'horizontalScale', 'verticalScale', 'tsume'].map(function (name) { return style[name]; });\n}\nvar identity = JSON.stringify([styleKey(), __BY_WORDS__, source]);\nfunction stored() {\n    try { return JSON.parse(value.toString()).identity === identity; } catch (e) { return false; }\n}\nfunction measured() {\n    var metrics = thisComp.layer(__METRICS__), frame = thisComp.frameDuration, memo = Object.create(null);\n    function measure(slot, key) {\n        if (!memo[key]) {\n            var r = metrics.sourceRectAtTime(slot * frame, false);\n            memo[key] = { left: r.left, top: r.top, width: r.width, height: r.height };\n        }\n        return memo[key];\n    }\n    var one = measure(0, 'Hg'), two = measure(1, 'Hg\\rHg');\n    var text = atomize(source);\n    // Slot 3 lifts the whole text by 10 px per word AE counts (see the metrics\n    // layer's animator), which is the only way to read AE's own word count.\n    var aeWords = Math.round((measure(2, '\\u0000plain').top - measure(3, '\\u0000lifted').top) / 10);\n    var ascent = -one.top, descent = -(one.top + one.height);\n    text.atoms.forEach(function (atom, k) {\n        var own = measure(7 + 3 * k, atom.s), pair = measure(8 + 3 * k, atom.pair);\n        // Rects are relative to the start of the measured string, which is the\n        // previous atom's origin. Glyphless atoms make ink edges unreliable.\n        atom.right = (atom.prev ? atom.prev.origin : 0) + pair.left + pair.width;\n        atom.left = atom.right - own.width;\n        atom.origin = atom.left - own.left;\n        atom.ink = own.width > 0;\n        ascent = Math.max(ascent, -own.top);\n        descent = Math.min(descent, -(own.top + own.height));\n    });\n    // AE aligns and justifies on advances, which include the space after the last\n    // letter. Rects only show ink, so the advance is worked out: from the next word\n    // when there is one, otherwise by setting an H after the word.\n    // Two strings that differ only by eight spaces: kerning cancels out, and rect\n    // rounding is divided by eight.\n    var plainH = measure(4, 'H'), rightH = plainH.left + plainH.width;\n    var space = (measure(6, 'H         H').width - measure(5, 'H H').width) / 8;\n    text.atoms.forEach(function (atom, k) {\n        var next = text.atoms[k + 1];\n        if (next && next.prev === atom && /^ +$/.test(next.gap)) atom.advance = next.origin - next.gap.length * space;\n        else {\n            var tail = measure(9 + 3 * k, atom.s + ' H');\n            atom.advance = atom.origin + tail.left + tail.width - space - rightH;\n        }\n    });\n    var lefts = [], key = 0;\n    var paragraphs = text.paragraphs.map(function (group) {\n        var words = group.map(function (atoms) {\n            // From the origin, as AE sets a line: starting at the ink would shift each\n            // line by the side bearing of its first letter.\n            var left = atoms[0].origin, right = atoms[atoms.length - 1].advance;\n            atoms.forEach(function (a) { a.token = key; });\n            lefts.push(left);\n            return { token: atoms.map(function (a) { return a.s; }).join(' '), key: key++, width: right - left, left: left, right: right, gapAfter: 0 };\n        });\n        for (var w = 0; w < words.length - 1; w++) words[w].gapAfter = Math.max(0, words[w + 1].left - words[w].right);\n        return words.map(function (v) { return { token: v.token, key: v.key, width: v.width, gapAfter: v.gapAfter }; });\n    });\n    // Token of each selector index. AE does not count a glyphless character as a\n    // word; anything else that disagrees is reported as stale so the panel can fall\n    // back to Characters, which is slower but always exact.\n    var order;\n    if (__BY_WORDS__) order = text.atoms.filter(function (a) { return a.ink; }).map(function (a) { return a.token; });\n    else {\n        var next = 0;\n        order = characterOffsets(source).map(function (offset) {\n            while (next < text.atoms.length && text.atoms[next].end <= offset) next++;\n            var atom = text.atoms[next];\n            return atom && offset >= atom.start ? atom.token : -1;\n        });\n    }\n    return JSON.stringify({ pitch: two.height - one.height, ascent: ascent, descent: descent, paragraphs: paragraphs, lefts: lefts, order: order, words: order.length, stale: __BY_WORDS__ && aeWords !== order.length, identity: identity });\n}\nstored() ? '=' : measured();\n",
+    "engine": "/* Source Text of the engine layer: one layout per frame, read by the selector.\n * Output: one 12-character record per selector index, \\r, a status line. The\n * fixed width lets each evaluation read its record without parsing the rest.\n * The core is Cartesian (+Y up), so every Y is negated at this boundary. */\nvar SRC = __SRC__;\nvar KAPPA = 0.5522847498, PARKED_LIMIT = 40000;\nfunction control(name) { return SRC.effect(name)(1).value; }\n// Two 6-digit base-36 fields: hundredths of a pixel, biased to stay positive.\nfunction field(v) { return ('00000' + (Math.round(v * 100) + 1e9).toString(36)).slice(-6); }\nfunction encode(dx, dy) { return field(dx) + field(dy); }\n\nfunction mapper(layer, chain) {\n    var o = SRC.fromComp(layer.toComp([0, 0, 0]));\n    var a = SRC.fromComp(layer.toComp([1, 0, 0]));\n    var b = SRC.fromComp(layer.toComp([0, 1, 0]));\n    var groups = chain.map(function (t) {\n        var angle = t.rotation.value * Math.PI / 180, sc = t.scale.value;\n        return { an: t.anchorPoint.value, po: t.position.value, sx: sc[0] / 100, sy: sc[1] / 100, c: Math.cos(angle), s: Math.sin(angle) };\n    });\n    return function (x, y) {\n        groups.forEach(function (g) {\n            var px = (x - g.an[0]) * g.sx, py = (y - g.an[1]) * g.sy;\n            x = g.po[0] + px * g.c - py * g.s;\n            y = g.po[1] + px * g.s + py * g.c;\n        });\n        return {\n            x: o[0] + (a[0] - o[0]) * x + (b[0] - o[0]) * y,\n            y: -(o[1] + (a[1] - o[1]) * x + (b[1] - o[1]) * y)\n        };\n    };\n}\nfunction polygon(region, map, points) {\n    points.forEach(function (p, i) {\n        region.data.push({ type: i ? 'lineTo' : 'moveTo', point: map(p[0], p[1]) });\n    });\n    region.data.push({ type: 'close' });\n}\nfunction bezierPath(region, map, pts, ins, outs) {\n    if (!pts.length) return;\n    region.data.push({ type: 'moveTo', point: map(pts[0][0], pts[0][1]) });\n    for (var i = 0; i < pts.length; i++) {\n        var a = pts[i], b = pts[(i + 1) % pts.length], oa = outs[i], ib = ins[(i + 1) % pts.length];\n        region.data.push({ type: 'cubicTo', cp1: map(a[0] + oa[0], a[1] + oa[1]), cp2: map(b[0] + ib[0], b[1] + ib[1]), point: map(b[0], b[1]) });\n    }\n    region.data.push({ type: 'close' });\n}\nfunction addPath(region, layer, chain, path) {\n    bezierPath(region, mapper(layer, chain), path.points(), path.inTangents(), path.outTangents());\n}\nfunction addEllipse(region, layer, chain, shape) {\n    var c = shape.position.value, rx = shape.size.value[0] / 2, ry = shape.size.value[1] / 2, kx = rx * KAPPA, ky = ry * KAPPA;\n    bezierPath(region, mapper(layer, chain),\n        [[c[0], c[1] - ry], [c[0] + rx, c[1]], [c[0], c[1] + ry], [c[0] - rx, c[1]]],\n        [[-kx, 0], [0, -ky], [kx, 0], [0, ky]],\n        [[kx, 0], [0, ky], [-kx, 0], [0, -ky]]);\n}\nfunction addRect(region, layer, chain, shape) {\n    var c = shape.position.value, w = shape.size.value[0] / 2, h = shape.size.value[1] / 2;\n    var r = Math.min(shape.roundness.value, w, h), k = r * KAPPA, l = c[0] - w, t = c[1] - h, R = c[0] + w, B = c[1] + h, map = mapper(layer, chain);\n    if (r <= 0) { polygon(region, map, [[l, t], [R, t], [R, B], [l, B]]); return; }\n    bezierPath(region, map,\n        [[l + r, t], [R - r, t], [R, t + r], [R, B - r], [R - r, B], [l + r, B], [l, B - r], [l, t + r]],\n        [[-k, 0], [0, 0], [0, -k], [0, 0], [k, 0], [0, 0], [0, k], [0, 0]],\n        [[0, 0], [k, 0], [0, 0], [0, k], [0, 0], [-k, 0], [0, 0], [0, -k]]);\n}\nfunction addStar(region, layer, chain, shape) {\n    var c = shape.position.value, n = Math.round(shape.points.value), isStar = shape.type.value === 1;\n    var outer = shape.outerRadius.value, inner = isStar ? shape.innerRadius.value : outer;\n    var start = (shape.rotation.value - 90) * Math.PI / 180, steps = isStar ? n * 2 : n, pts = [];\n    for (var i = 0; i < steps; i++) {\n        var r = (isStar && i % 2) ? inner : outer, angle = start + i * 2 * Math.PI / steps;\n        pts.push([c[0] + r * Math.cos(angle), c[1] + r * Math.sin(angle)]);\n    }\n    polygon(region, mapper(layer, chain), pts);\n}\nfunction addBounds(region, layer) {\n    var r = layer.sourceRectAtTime(time, false), l = r.left, t = r.top, R = l + r.width, B = t + r.height;\n    // A text with its own wrap: parked words would make its rect cover everything.\n    if (r.height > PARKED_LIMIT || r.width > PARKED_LIMIT) return;\n    polygon(region, mapper(layer, []), [[l, t], [R, t], [R, B], [l, B]]);\n}\nfunction inRegion(region, x, y) {\n    var inside = false;\n    region.edges.forEach(function (e) {\n        var a = e[0], b = e[1];\n        if ((a.y > y) !== (b.y > y) && x < a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)) inside = !inside;\n    });\n    return inside;\n}\nfunction layout() {\n    var AREA = [], EXCLUSIONS = [], missing = 0;\n    /*@@REGIONS@@*/\n    var padding = Math.max(0, control('TW Padding')), tolerance = Math.max(0.05, control('TW Tolleranza curve'));\n    var alignment = control('TW Allineamento') - 1, justifyFinal = control('TW Giustifica ultima riga') > 0, suppress = control('TW Overflow') === 2;\n    var lineSpacing = control('TW Interlinea extra'), paragraphSpacing = control('TW Spazio paragrafi');\n\n    var cached = thisComp.layer(__CACHE__).text.sourceText.valueAtTime(0).toString();\n    var text = JSON.parse(cached === '=' ? value.toString() : cached);\n    var pitch = text.pitch, ascent = text.ascent, descent = text.descent, rowPitch = pitch + lineSpacing;\n    if (!(rowPitch > 0)) throw new Error('interlinea non positiva.');\n\n    var areaEdges = [], holeEdges = [], bounds = { top: -Infinity, bottom: Infinity, left: Infinity, right: -Infinity };\n    AREA.forEach(function (region) {\n        var flat = TextAreaCore.flatten(region.data, tolerance);\n        region.edges = flat.edges;\n        areaEdges = areaEdges.concat(flat.edges);\n        bounds.top = Math.max(bounds.top, flat.bounds.top);\n        bounds.bottom = Math.min(bounds.bottom, flat.bounds.bottom);\n        bounds.left = Math.min(bounds.left, flat.bounds.left);\n        bounds.right = Math.max(bounds.right, flat.bounds.right);\n    });\n    if (!isFinite(bounds.top)) throw new Error('area mancante o vuota: premi Applica / Aggiorna wrap.');\n    // A shape scaled to nothing or an invalid path must not stop the whole layout.\n    EXCLUSIONS = EXCLUSIONS.filter(function (region) {\n        try { region.edges = TextAreaCore.flatten(region.data, tolerance).edges; } catch (e) { return false; }\n        holeEdges = holeEdges.concat(region.edges);\n        return true;\n    });\n\n    var rows = [], first = bounds.top - ascent, last = bounds.bottom - descent;\n    for (var y = first; y >= last - 1e-7 && rows.length < 2000; y -= rowPitch) rows.push({ index: rows.length, baseline: y });\n    function inArea(x, y) { return AREA.some(function (r) { return inRegion(r, x, y); }); }\n    function outsideHoles(x, y) { return !EXCLUSIONS.some(function (r) { return inRegion(r, x, y); }); }\n    // Scanning for free space outside the holes needs a boundary on both sides.\n    var margin = 2 * (padding + tolerance) + 10, sides = [bounds.left - margin, bounds.right + margin].map(function (x) { return [{ x: x, y: -1e7 }, { x: x, y: 1e7 }]; });\n    // The area frames the text exactly, so a block stays where it is. Padding is\n    // the distance from the shapes only, like the text wrap offset in InDesign.\n    function segmentsAt(baseline) {\n        var top = baseline + ascent, bottom = baseline + descent;\n        var free = TextAreaCore.bandSegments({ edges: areaEdges }, top, bottom, 0, 0, inArea);\n        if (!holeEdges.length || !free.length) return free;\n        return TextAreaCore.intersect(free, TextAreaCore.bandSegments({ edges: holeEdges.concat(sides) }, top, bottom, padding, tolerance, outsideHoles));\n    }\n    var flowed = TextAreaCore.flow(text.paragraphs, rows, {\n        alignment: alignment, justifyFinal: justifyFinal, paragraphSpacing: paragraphSpacing, overflowPolicy: 0, segmentsAt: segmentsAt,\n        minGap: alignment === 3 ? 0.8 : 1 // AE's default minimum word spacing\n    });\n\n    var hideAll = suppress && flowed.overflow.length > 0;\n    // Unplaced words are parked off screen: a second animator just to hide them\n    // would double the per-word cost.\n    var parked = encode(0, __PARKED__), still = encode(0, 0);\n    var cells = text.lefts.map(function () { return parked; });\n    if (!hideAll) flowed.placements.forEach(function (v) {\n        cells[v.key] = encode(v.x - text.lefts[v.key], -v.baseline - v.paragraph * pitch);\n    });\n    var status = flowed.overflow.length\n        ? 'OVERFLOW: ' + flowed.overflow.length + ' parole escluse, prima: ' + flowed.overflow[0].token\n        : 'OK: ' + flowed.placedWords + ' parole disposte';\n    if (missing) status += ' (' + missing + ' livelli non trovati)';\n    if (text.stale) status = __STALE__;\n    return text.order.map(function (token) { return token < 0 ? still : cells[token]; }).join('') + '\\r' + status;\n}\nvar result;\ntry { result = layout(); } catch (e) { result = '\\rERRORE: ' + e.message; }\nresult;\n",
+    "selector": "/* Reads this word's record. A deleted engine must leave the text alone, not raise\n * AE's error banner; a short record means the engine failed, so the word is parked. */\nvar offset = [0, 0, 0];\ntry {\n    var r = thisComp.layer(__ENGINE__).text.sourceText.value.toString().substr((textIndex - 1) * 12, 12);\n    var dx = parseInt(r.substr(0, 6), 36), dy = parseInt(r.substr(6, 6), 36);\n    offset = r.length === 12 && r.indexOf('\\r') < 0 ? [(dx - 1e9) / (100 * __SCALE__), (dy - 1e9) / (100 * __SCALE__), 0] : [0, __PARKED__ / __SCALE__, 0];\n} catch (e) { /* engine deleted */ }\noffset;\n",
     "count": "Math.round(time / thisComp.frameDuration) === 3 ? [0, -textTotal / 100, 0] : [0, 0, 0];\n"
 };
 
+    // While the panel applies several blocks, messages are collected and shown once.
+    var notices = null;
+    function notify(message) {
+        if (!notices) { alert(message); return; }
+        for (var i = 0; i < notices.length; i++) if (notices[i] === message) return;
+        notices.push(message);
+    }
     function textDoc(layer) { return layer.property('ADBE Text Properties').property('ADBE Text Document'); }
     function animators(layer) { return layer.property('ADBE Text Properties').property('ADBE Text Animators'); }
     function effects(layer) { return layer.property('ADBE Effect Parade'); }
@@ -37,30 +46,60 @@
     }
 
     /* ---- install state ---- */
-    function helperNames(layer) {
-        return { metrics: 'TW Metriche #' + layer.id, cache: 'TW Cache #' + layer.id, engine: 'TW Motore #' + layer.id };
-    }
+    function helperIds(id) { return { metrics: 'TW Metriche #' + id, cache: 'TW Cache #' + id, engine: 'TW Motore #' + id }; }
     function helper(comp, name) {
         for (var i = 1; i <= comp.numLayers; i++) if (comp.layer(i).name === name) return comp.layer(i);
         return null;
     }
-    function isInstalled(layer) { return !!helper(layer.containingComp, helperNames(layer).engine); }
-    function readConfig(layer) {
-        var engine = helper(layer.containingComp, helperNames(layer).engine), config = { area: [], exclusions: [] };
-        if (!engine) return config;
-        var parts = engine.comment.split('|');
-        function ids(s) { var out = [], v = s ? s.split(',') : []; for (var i = 0; i < v.length; i++) out.push(parseInt(v[i], 10)); return out; }
-        config.area = ids(parts[0]);
-        config.exclusions = ids(parts[1]);
-        return config;
+    function moveSelector(layer) {
+        var list = animators(layer);
+        for (var i = 1; i <= list.numProperties; i++) if (list.property(i).name === ANIM_MOVE) return list.property(i).property('ADBE Text Selectors').property(1);
+        return null;
     }
-    function savedLayers(comp, text) {
-        var config = readConfig(text), saved = { area: [], exclusions: [] };
-        for (var a = 0; a < config.area.length; a++) { var la = byId(comp, config.area[a]); if (la) saved.area.push(la); }
-        for (var x = 0; x < config.exclusions.length; x++) { var lx = byId(comp, config.exclusions[x]); if (lx) saved.exclusions.push(lx); }
+    // The id in the helper names the selector of this layer reads. It differs from
+    // layer.id on a duplicated layer, and on any layer of a duplicated comp.
+    function linkedId(layer) {
+        var selector = moveSelector(layer);
+        if (!selector) return null;
+        var found = selector.property('ADBE Text Expressible Amount').expression.match(/TW Motore #(\d+)/);
+        return found ? parseInt(found[1], 10) : null;
+    }
+    function controlTarget(comp, engine, name) {
+        var control = effects(engine).property(name), index = control ? control.property(1).value : 0;
+        return index > 0 && index <= comp.numLayers ? comp.layer(index) : null;
+    }
+    function helperNames(layer) {
+        var comp = layer.containingComp, linked = linkedId(layer);
+        if (linked !== null && linked !== layer.id) {
+            var engine = helper(comp, helperIds(linked).engine);
+            if (engine && controlTarget(comp, engine, CONTROL_TEXT) === layer) return helperIds(linked);
+        }
+        return helperIds(layer.id);
+    }
+    function isInstalled(layer) { return !!helper(layer.containingComp, helperNames(layer).engine); }
+    // Layer Controls keep following their layers when ids change with a comp copy.
+    function engineLayers(comp, engine) {
+        var saved = { area: [], exclusions: [] }, fx = effects(engine);
+        for (var i = 1; i <= fx.numProperties; i++) {
+            var name = fx.property(i).name, target = controlTarget(comp, engine, name);
+            if (!target) continue;
+            if (name.indexOf('TW Area ') === 0) saved.area.push(target);
+            else if (name.indexOf('TW Esclusione ') === 0) saved.exclusions.push(target);
+        }
         return saved;
     }
+    function savedLayers(comp, text) {
+        var engine = helper(comp, helperNames(text).engine);
+        return engine ? engineLayers(comp, engine) : { area: [], exclusions: [] };
+    }
+    // Written by install: area ids | exclusion ids | justification | original box id.
+    function restoreData(comp, text) {
+        var engine = helper(comp, helperNames(text).engine), parts = engine ? engine.comment.split('|') : [];
+        return { justification: parts[2] ? parseInt(parts[2], 10) : null, original: parts[3] ? parseInt(parts[3], 10) : null };
+    }
+    function isAutoArea(layer) { return layer.name.indexOf(AUTO_AREA) === 0; }
     function layerIds(list) { var out = []; for (var i = 0; i < list.length; i++) out.push(list[i].id); return out.join(','); }
+    function without(list, layer) { var out = []; for (var i = 0; i < list.length; i++) if (list[i] !== layer) out.push(list[i]); return out; }
 
     /* ---- shapes to expression code ---- */
     function accessor(group, property, parentExpr) {
@@ -86,7 +125,7 @@
     function regionCode(layer, listName, index, control) {
         var v = listName + index, ref = v + 'Layer', lines = [];
         lines.push('var ' + ref + ' = thisLayer.effect(' + quote(control) + ')(1);');
-        lines.push('var ' + v + ' = { data: [] }; ' + listName + '.push(' + v + ');');
+        lines.push('var ' + v + ' = { data: [] };');
         function emit(fn, chain, target) { lines.push(fn + '(' + v + ', ' + ref + ', [' + chain.join(', ') + '], ' + target + ');'); }
         var found = 0;
         if (layer instanceof ShapeLayer) found = walkShapes(layer.property('ADBE Root Vectors Group'), ref, [], emit);
@@ -96,7 +135,9 @@
             found++;
         }
         if (!found) lines.push('addBounds(' + v + ', ' + ref + ');');
-        return lines.join('\n');
+        lines.push(listName + '.push(' + v + ');');
+        // A deleted layer or shape skips this region, not the whole layout.
+        return 'try {\n' + lines.join('\n') + '\n} catch (e) { missing++; }';
     }
 
     /* ---- setup pieces ---- */
@@ -120,10 +161,10 @@
         menu.setValue(value);
         menu.propertyGroup(1).name = name;
     }
-    function addControls(layer) {
+    function addControls(layer, alignment, justifyFinal) {
         addSlider(layer, 'TW Padding', 12);
-        addDropdown(layer, 'TW Allineamento', ['Sinistra', 'Centro', 'Destra', 'Giustificato'], 4);
-        addCheckbox(layer, 'TW Giustifica ultima riga', 0);
+        addDropdown(layer, 'TW Allineamento', ['Sinistra', 'Centro', 'Destra', 'Giustificato'], alignment);
+        addCheckbox(layer, 'TW Giustifica ultima riga', justifyFinal ? 1 : 0);
         addDropdown(layer, 'TW Overflow', ['Mostra le parole che entrano', 'Nascondi tutto'], 1);
         addSlider(layer, 'TW Interlinea extra', 0);
         addSlider(layer, 'TW Spazio paragrafi', 0);
@@ -169,37 +210,85 @@
         addLayerControl(layer, CONTROL_TEXT, text);
         return layer;
     }
-    function defaultArea(comp, name, rect) {
-        var r = rect || [comp.width * 0.15, comp.height * 0.15, comp.width * 0.7, comp.height * 0.7];
+    // The rectangle of a block in its own layer coordinates, from AE's baselines.
+    function blockFrame(comp, text) {
+        var doc = textDoc(text).valueAtTime(0, false), locs = doc.baselineLocs, left = Infinity, right = -Infinity;
+        if (!locs || locs.length < 4) return null;
+        for (var i = 0; i + 3 < locs.length; i += 4) { left = Math.min(left, locs[i]); right = Math.max(right, locs[i + 2]); }
+        var frame = { left: left, right: right, baseline: locs[1], lastBaseline: locs[locs.length - 1], bottom: 0 };
+        if (doc.boxText) {
+            frame.left = doc.boxTextPos[0];
+            frame.right = doc.boxTextPos[0] + doc.boxTextSize[0];
+            frame.bottom = doc.boxTextPos[1] + doc.boxTextSize[1];
+            return frame;
+        }
+        // Point text has no box: leave room for the lines pushed down by the shapes.
+        // The longest line must fit: 2 px of room on the side the text can grow to.
+        var before = 0, after = 2;
+        if (doc.justification === ParagraphJustification.CENTER_JUSTIFY) { before = 1; after = 1; }
+        else if (doc.justification === ParagraphJustification.RIGHT_JUSTIFY) { before = 2; after = 0; }
+        frame.left -= before;
+        frame.right += after;
+        var group = text.property('ADBE Transform Group'), scale = group.property('ADBE Scale').value[1] / 100;
+        var position = group.property('ADBE Position').value[1], anchor = group.property('ADBE Anchor Point').value[1];
+        frame.bottom = text.parent || !scale ? frame.lastBaseline + (frame.lastBaseline - frame.baseline) / 2 : anchor + (comp.height - position) / scale;
+        return frame;
+    }
+    // A guide child of the text: moving, scaling or rotating the block moves the wrap too.
+    function addAutoArea(comp, text) {
         var layer = comp.layers.addShape();
-        layer.name = 'TW Area - ' + name;
+        layer.name = AUTO_AREA + text.name.substr(0, 30);
         var group = layer.property('ADBE Root Vectors Group').addProperty('ADBE Vector Group');
         var shapes = group.property('ADBE Vectors Group');
-        shapes.addProperty('ADBE Vector Shape - Rect').property('ADBE Vector Rect Size').setValue([r[2], r[3]]);
+        shapes.addProperty('ADBE Vector Shape - Rect');
         var stroke = shapes.addProperty('ADBE Vector Graphic - Stroke');
         stroke.property('ADBE Vector Stroke Color').setValue([0.4, 0.7, 1, 1]);
         stroke.property('ADBE Vector Stroke Width').setValue(1);
-        layer.property('ADBE Transform Group').property('ADBE Position').setValue([r[0] + r[2] / 2, r[1] + r[3] / 2]);
         layer.guideLayer = true;
+        layer.setParentWithJump(text);
         return layer;
+    }
+    // The engine sets the first baseline at the top of the area minus the ascent.
+    function fitAutoArea(layer, frame, ascent, descent) {
+        var top = frame.baseline - ascent, bottom = Math.max(frame.bottom, frame.lastBaseline - descent + 1);
+        var rect = layer.property('ADBE Root Vectors Group').property(1).property('ADBE Vectors Group').property(1);
+        rect.property('ADBE Vector Rect Size').setValue([frame.right - frame.left, bottom - top]);
+        layer.property('ADBE Transform Group').property('ADBE Position').setValue([(frame.left + frame.right) / 2, (top + bottom) / 2]);
+    }
+    function copyProperty(from, to) {
+        if (from.expression) to.expression = from.expression;
+        if (!from.numKeys) { to.setValue(from.value); return; }
+        for (var k = 1; k <= from.numKeys; k++) {
+            to.setValueAtTime(from.keyTime(k), from.keyValue(k));
+            to.setInterpolationTypeAtKey(k, from.keyInInterpolationType(k), from.keyOutInterpolationType(k));
+            if (from.keyInInterpolationType(k) === KeyframeInterpolationType.BEZIER) to.setTemporalEaseAtKey(k, from.keyInTemporalEase(k), from.keyOutTemporalEase(k));
+        }
+    }
+    function copyTransform(from, to) {
+        var a = from.property('ADBE Transform Group'), b = to.property('ADBE Transform Group'), list = ['ADBE Anchor Point', 'ADBE Scale', 'ADBE Rotate Z', 'ADBE Opacity'];
+        if (a.property('ADBE Position').dimensionsSeparated) {
+            b.property('ADBE Position').dimensionsSeparated = true;
+            list.push('ADBE Position_0', 'ADBE Position_1');
+        } else list.push('ADBE Position');
+        for (var i = 0; i < list.length; i++) copyProperty(a.property(list[i]), b.property(list[i]));
     }
     // Box text wraps by itself and its word positions cannot be predicted, so
     // the wrap needs point text. boxText is read-only: a new layer is the only way.
     function pointTextFrom(comp, box) {
-        var doc = textDoc(box).value, fresh = comp.layers.addText(doc.text), target = textDoc(fresh).value;
-        var fields = ['font', 'fontSize', 'tracking', 'leading', 'autoLeading', 'applyFill', 'fillColor', 'applyStroke', 'strokeWidth', 'strokeColor', 'fauxBold', 'fauxItalic'];
-        for (var i = 0; i < fields.length; i++) { try { target[fields[i]] = doc[fields[i]]; } catch (e) { /* not set on this document */ } }
+        var doc = textDoc(box).valueAtTime(0, false), fresh = comp.layers.addText(doc.text), target = textDoc(fresh).value;
+        for (var i = 0; i < STYLE_FIELDS.length; i++) { try { target[STYLE_FIELDS[i]] = doc[STYLE_FIELDS[i]]; } catch (e) { /* not set on this document */ } }
         textDoc(fresh).setValue(target);
-        var position = box.property('ADBE Transform Group').property('ADBE Position').value;
-        var anchor = box.property('ADBE Transform Group').property('ADBE Anchor Point').value;
-        fresh.property('ADBE Transform Group').property('ADBE Position').setValue(position);
+        copyTransform(box, fresh);
+        var fields = ['startTime', 'inPoint', 'outPoint', 'blendingMode', 'motionBlur', 'quality', 'label', 'shy'];
+        for (var f = 0; f < fields.length; f++) { try { fresh[fields[f]] = box[fields[f]]; } catch (e2) { /* not available on this layer */ } }
+        if (box.parent) fresh.setParentWithJump(box.parent);
         fresh.moveBefore(box);
+        if (effects(box).numProperties || box.property('ADBE Mask Parade').numProperties) notify(box.name.substr(0, 30) + ': effetti e maschere del testo in box non vengono copiati sul nuovo livello.');
         var name = box.name;
-        box.name = name + ' (box originale)';
+        box.name = name + ORIGINAL_SUFFIX;
         box.enabled = false;
         fresh.name = name;
-        var offset = doc.boxTextPos, size = doc.boxTextSize;
-        return { layer: fresh, rect: [position[0] - anchor[0] + offset[0], position[1] - anchor[1] + offset[1], size[0], size[1]] };
+        return fresh;
     }
 
     // Reads AE's word count by lifting the layer 10 px per word for a moment.
@@ -212,29 +301,74 @@
         amount.expression = real;
         return Math.round((rest - lifted) / 10);
     }
-    function expectedWords(cache) {
-        var found = textDoc(cache).valueAtTime(0, false).text.match(/"words":(\d+)/);
-        return found ? parseInt(found[1], 10) : -1;
-    }
-
     // Sets the text under a layer's expression, which reads it back as value.
     function storeText(layer, value) { textDoc(layer).setValue(new TextDocument(value)); }
-
-    function install(comp, text, area, exclusions) {
-        var boxRect = null;
-        if (textDoc(text).value.boxText) {
-            var converted = pointTextFrom(comp, text);
-            text = converted.layer;
-            boxRect = converted.rect;
+    function alignmentOf(justification) {
+        var J = ParagraphJustification;
+        if (justification === J.CENTER_JUSTIFY) return 2;
+        if (justification === J.RIGHT_JUSTIFY) return 3;
+        return justification === J.LEFT_JUSTIFY ? 1 : 4;
+    }
+    function measure(json, field) {
+        var found = json.match(new RegExp('"' + field + '":(-?[0-9.eE+-]+)'));
+        return found ? parseFloat(found[1]) : 0;
+    }
+    // A duplicated block still reads the wrap of its source: it starts from the same setup.
+    function duplicatedFrom(comp, text) {
+        var linked = linkedId(text);
+        if (linked === null || linked === text.id) return null;
+        var engine = helper(comp, helperIds(linked).engine);
+        return engine && controlTarget(comp, engine, CONTROL_TEXT) !== text ? engineLayers(comp, engine) : null;
+    }
+    // A text with its own wrap is an obstacle through its area: reading the text
+    // itself would see its parked words, and two blocks would depend on each other.
+    function obstacles(comp, text, list, area) {
+        var out = [];
+        function add(layer) {
+            for (var o = 0; o < out.length; o++) if (out[o] === layer) return;
+            for (var a = 0; a < area.length; a++) if (area[a] === layer) return;
+            if (layer !== text) out.push(layer);
         }
-        if (!area.length) area = [defaultArea(comp, text.name, boxRect)];
+        for (var i = 0; i < list.length; i++) {
+            if (isText(list[i]) && isInstalled(list[i])) { var own = savedLayers(comp, list[i]).area; for (var k = 0; k < own.length; k++) add(own[k]); }
+            else add(list[i]);
+        }
+        return out;
+    }
+    function install(comp, text, area, exclusions) {
+        if (text.threeDLayer) throw new Error('i livelli 3D non sono supportati.');
+        if (text.locked) throw new Error('il livello e bloccato.');
+        area = without(area, text);
+        exclusions = without(exclusions, text);
+        // Before the animator goes: on a comp copy the names come from its selector.
+        var restore = restoreData(comp, text), source = duplicatedFrom(comp, text), names = helperNames(text);
+        removeAnimators(text);
+        var doc = textDoc(text).valueAtTime(0, false), justification = restore.justification !== null ? restore.justification : doc.justification;
+        var frame = area.length || source ? null : blockFrame(comp, text), original = restore.original;
+        if (doc.boxText) {
+            original = text.id;
+            text = pointTextFrom(comp, text);
+            names = helperIds(text.id);
+        }
+        if (source) {
+            for (var s = 0; s < source.area.length && !area.length; s++) {
+                if (!isAutoArea(source.area[s])) { area = source.area; break; }
+                var copy = source.area[s].duplicate();
+                copy.name = AUTO_AREA + text.name.substr(0, 30);
+                copy.setParentWithJump(text);
+                area = [copy];
+            }
+            if (!exclusions.length) exclusions = source.exclusions;
+        }
+        var auto = null;
+        if (!area.length) { auto = addAutoArea(comp, text); area = [auto]; }
+        exclusions = obstacles(comp, text, exclusions, area);
 
-        var doc = textDoc(text).value;
+        doc = textDoc(text).value;
         doc.justification = ParagraphJustification.LEFT_JUSTIFY;
         textDoc(text).setValue(doc);
 
-        addControls(text);
-        var names = helperNames(text);
+        addControls(text, alignmentOf(justification), justification === ParagraphJustification.FULL_JUSTIFY_LASTLINE_FULL);
         var metrics = addHelper(comp, names.metrics, text), cache = addHelper(comp, names.cache, text), engine = addHelper(comp, names.engine, text);
         var regions = [];
         for (var a = 0; a < area.length; a++) {
@@ -248,37 +382,67 @@
 
         var vars = { '__SRC__': 'thisLayer.effect(' + quote(CONTROL_TEXT) + ')(1)', '__METRICS__': quote(names.metrics), '__CACHE__': quote(names.cache), '__ENGINE__': quote(names.engine), '__SCALE__': String(SCALE), '__BY_WORDS__': 'true', '__STALE__': quote(STALE), '__PARKED__': String(PARKED), '/*@@REGIONS@@*/': regions.join('\n') };
         textDoc(metrics).expression = EXPR.atoms + '\n' + fill(EXPR.metrics, vars);
-        textDoc(cache).expression = EXPR.atoms + '\n' + fill(EXPR.cache, vars);
-        storeText(cache, 'TW');
-        textDoc(engine).expression = EXPR.core + '\n' + fill(EXPR.engine, vars);
-
-        removeAnimators(text);
         removeAnimators(metrics);
         addAnimator(metrics, ANIM_COUNT, 'ADBE Text Position 3D', [0, POSITION, 0], BASED_ON_WORDS, EXPR.count);
+        // Measures are stored before any selector exists: every word that reads the
+        // engine would otherwise wait for a full measurement.
+        function storeMeasures() {
+            textDoc(cache).expression = EXPR.atoms + '\n' + fill(EXPR.cache, vars);
+            storeText(cache, 'TW');
+            var measures = textDoc(cache).valueAtTime(0, false).text;
+            storeText(cache, measures);
+            storeText(engine, measures);
+            return measures;
+        }
+        var measures = storeMeasures();
+        textDoc(engine).expression = EXPR.core + '\n' + fill(EXPR.engine, vars);
+        if (auto) fitAutoArea(auto, frame || emptyFrame(comp), measure(measures, 'ascent'), measure(measures, 'descent'));
         var selector = addAnimator(text, ANIM_MOVE, 'ADBE Text Position 3D', [POSITION, POSITION, 0], BASED_ON_WORDS, fill(EXPR.selector, vars));
         // Words are several times cheaper to evaluate than characters. Use them
         // unless AE's own count on the real layer disagrees (mixed fonts).
-        var stale = status(text) === STALE, mixed = wordsOnLayer(text, selector) !== expectedWords(cache);
+        var stale = status(text) === STALE, mixed = wordsOnLayer(text, selector) !== measure(measures, 'words');
         if (stale || mixed) {
             vars['__BY_WORDS__'] = 'false';
-            textDoc(cache).expression = EXPR.atoms + '\n' + fill(EXPR.cache, vars);
+            storeMeasures();
             selector.property('ADBE Text Range Type2').setValue(BASED_ON_CHARACTERS);
         }
-        if (mixed) alert('Questo testo usa piu font nello stesso livello, forse per un simbolo non presente nel font principale.\nLe righe possono uscire dai margini: usa un solo font o rimuovi il simbolo, poi premi Applica / Aggiorna wrap.');
+        if (mixed) notify('Questo testo usa piu font nello stesso livello, forse per un simbolo non presente nel font principale.\nLe righe possono uscire dai margini: usa un solo font o rimuovi il simbolo, poi premi Applica / Aggiorna wrap.');
 
-        var measures = textDoc(cache).valueAtTime(0, false).text;
-        storeText(cache, measures);
-        storeText(engine, measures);
-        engine.comment = layerIds(area) + '|' + layerIds(exclusions);
+        engine.comment = layerIds(area) + '|' + layerIds(exclusions) + '|' + justification + '|' + (original || '');
         metrics.locked = true;
         cache.locked = true;
         engine.locked = true;
         return text;
     }
+    function emptyFrame(comp) { return { left: 0, right: comp.width / 2, baseline: 0, lastBaseline: 0, bottom: comp.height / 2 }; }
+    // The disabled box a text was converted from. Older wraps did not record it, and
+    // their removal left it off, so it is also found by the name the conversion gave it.
+    function originalOf(comp, text, id) {
+        var recorded = id ? byId(comp, id) : null;
+        if (recorded) return recorded;
+        var wanted = text.name + ORIGINAL_SUFFIX, body = textDoc(text).value.text, named = null;
+        for (var i = 1; i <= comp.numLayers; i++) {
+            var layer = comp.layer(i);
+            if (layer === text || layer.name !== wanted || !isText(layer)) continue;
+            if (textDoc(layer).value.text === body) return layer;
+            named = named || layer;
+        }
+        return named;
+    }
+    // The block to act on when the disabled original is selected instead: they look alike.
+    function activeBlock(comp, layer) {
+        var at = layer.name.length - ORIGINAL_SUFFIX.length;
+        if (at <= 0 || layer.name.indexOf(ORIGINAL_SUFFIX, at) !== at) return layer;
+        var name = layer.name.substr(0, at);
+        for (var i = 1; i <= comp.numLayers; i++) if (comp.layer(i).name === name && isText(comp.layer(i))) return comp.layer(i);
+        return layer;
+    }
+    function canRemove(comp, text) { return isInstalled(text) || !!originalOf(comp, text, null); }
+    // Puts the block back as it was. Returns the layer that remains.
     function uninstall(text) {
         var comp = text.containingComp, names = helperNames(text), list = [names.metrics, names.cache, names.engine];
-        var area = savedLayers(comp, text).area;
-        for (var d = 0; d < area.length; d++) if (area[d].name.indexOf('TW Area - ') === 0) area[d].remove();
+        var area = savedLayers(comp, text).area, restore = restoreData(comp, text);
+        for (var d = 0; d < area.length; d++) if (isAutoArea(area[d])) area[d].remove();
         removeAnimators(text);
         var fx = effects(text);
         for (var i = fx.numProperties; i >= 1; i--) if (fx.property(i).name.indexOf('TW ') === 0) fx.property(i).remove();
@@ -286,6 +450,17 @@
             var layer = helper(comp, list[n]);
             if (layer) { layer.locked = false; layer.remove(); }
         }
+        var doc = textDoc(text).value, original = originalOf(comp, text, restore.original);
+        if (original) {
+            var box = textDoc(original).value;
+            if (box.text !== doc.text) { box.text = doc.text; textDoc(original).setValue(box); }
+            original.enabled = true;
+            original.name = text.name;
+            text.remove();
+            return original;
+        }
+        if (restore.justification !== null) { doc.justification = restore.justification; textDoc(text).setValue(doc); }
+        return text;
     }
     function status(text) {
         var engine = helper(text.containingComp, helperNames(text).engine);
@@ -333,6 +508,7 @@
         doc.applyFill = true;
         doc.fillColor = [0.12, 0.14, 0.17];
         doc.applyStroke = false;
+        doc.justification = ParagraphJustification.FULL_JUSTIFY_LASTLINE_LEFT;
         textDoc(text).setValue(doc);
         text.property('ADBE Transform Group').property('ADBE Position').setValue([180, 150]);
         install(comp, text, [area], [circle]);
@@ -397,10 +573,12 @@
             return out;
         }
         function isInstalledHelper(layer) { return layer.name.indexOf('TW Metriche #') === 0 || layer.name.indexOf('TW Cache #') === 0 || layer.name.indexOf('TW Motore #') === 0; }
-        function selectedText(comp) {
-            for (var i = 0; i < comp.selectedLayers.length; i++) if (isText(comp.selectedLayers[i]) && !isInstalledHelper(comp.selectedLayers[i])) return comp.selectedLayers[i];
-            return null;
+        function selectedTexts(comp) {
+            var out = [];
+            for (var i = 0; i < comp.selectedLayers.length; i++) if (isText(comp.selectedLayers[i]) && !isInstalledHelper(comp.selectedLayers[i])) out.push(comp.selectedLayers[i]);
+            return out;
         }
+        function selectedText(comp) { return selectedTexts(comp)[0] || null; }
         function contains(list, layer) { for (var i = 0; i < list.length; i++) if (list[i] === layer) return true; return false; }
         function needComp() { var c = activeComp(); if (!c) alert('Apri una composizione.'); return c; }
 
@@ -422,29 +600,42 @@
         exRemove.onClick = function () {
             if (exList.selection) { exclusions.splice(exList.selection.index, 1); refresh(); }
         };
+        // Every selected text gets its own wrap around the selected shapes. A text
+        // listed by hand as area or exclusion stays what the list says it is.
+        function setupFor(comp, text, single, all) {
+            var useArea = single ? area : [], useExclusions = exclusions.slice(0);
+            if (loadedFor === text.id) return { area: useArea, exclusions: useExclusions };
+            var saved = savedLayers(comp, text);
+            if (!useArea.length) useArea = saved.area;
+            if (!useExclusions.length) useExclusions = saved.exclusions;
+            for (var i = 0; i < all.length; i++) if (!isText(all[i]) && !contains(useArea, all[i]) && !contains(useExclusions, all[i])) useExclusions.push(all[i]);
+            return { area: useArea, exclusions: useExclusions };
+        }
         apply.onClick = function () {
             var comp = needComp(); if (!comp) return;
-            var text = selectedText(comp);
-            if (!text) { alert('Seleziona un livello di testo.'); return; }
+            // Read once: installing a wrap adds layers and changes the selection.
+            var picked = selectedTexts(comp), selection = shapesInSelection(comp), targets = [];
+            for (var i = 0; i < picked.length; i++) if (!contains(exclusions, picked[i]) && (picked.length === 1 || !contains(area, picked[i]))) targets.push(picked[i]);
+            if (!targets.length) { alert('Seleziona un livello di testo.'); return; }
             if (!checkEngine()) return;
-            var useArea = area, useExclusions = exclusions;
-            if (loadedFor !== text.id) {
-                // Not edited through Carica: keep what is installed and treat
-                // anything else in the selection as a new exclusion.
-                var saved = savedLayers(comp, text), all = shapesInSelection(comp);
-                if (!useArea.length) useArea = saved.area;
-                if (!exclusions.length) {
-                    useExclusions = saved.exclusions;
-                    for (var i = 0; i < all.length; i++) if (all[i] !== text && !contains(useArea, all[i]) && !contains(useExclusions, all[i])) useExclusions.push(all[i]);
-                }
-            }
             guarded('Applica', function () {
-                var result = install(comp, text, useArea, useExclusions);
+                var failed = [], result = null;
+                notices = [];
+                if (area.length && targets.length > 1) notify("Con piu testi selezionati l'area scelta non viene usata: ogni blocco tiene la propria.");
+                for (var t = 0; t < targets.length; t++) {
+                    try {
+                        var setup = setupFor(comp, targets[t], targets.length === 1, selection);
+                        result = install(comp, targets[t], setup.area, setup.exclusions);
+                    } catch (e) { failed.push(targets[t].name.substr(0, 30) + ': ' + e.message); }
+                }
+                var messages = failed.concat(notices);
+                notices = null;
                 area = [];
                 exclusions = [];
                 loadedFor = null;
                 refresh();
-                statusLabel.text = status(result);
+                statusLabel.text = targets.length > 1 ? (targets.length - failed.length) + ' blocchi su ' + targets.length + ' aggiornati.' : (result ? status(result) : 'Wrap non applicato.');
+                if (messages.length) alert(messages.join('\n\n'));
             });
         };
         check.onClick = function () {
@@ -460,9 +651,14 @@
         };
         remove.onClick = function () {
             var comp = needComp(); if (!comp) return;
-            var text = selectedText(comp);
-            if (!text) { alert('Seleziona il livello di testo.'); return; }
-            guarded('Rimuovi', function () { uninstall(text); statusLabel.text = 'Wrap rimosso.'; });
+            var texts = selectedTexts(comp);
+            if (!texts.length) { alert('Seleziona il livello di testo.'); return; }
+            guarded('Rimuovi', function () {
+                var blocks = [], removed = 0;
+                for (var i = 0; i < texts.length; i++) { var block = activeBlock(comp, texts[i]); if (!contains(blocks, block)) blocks.push(block); }
+                for (var b = 0; b < blocks.length; b++) if (canRemove(comp, blocks[b])) { uninstall(blocks[b]); removed++; }
+                statusLabel.text = removed ? 'Wrap rimosso.' : 'Nessun wrap sul livello selezionato.';
+            });
         };
         demo.onClick = function () { if (checkEngine()) guarded('Demo', createDemo); };
 
@@ -473,7 +669,7 @@
 
     // Test hook: tests/verify-ae.jsx sets this flag to drive the same code as the panel.
     if ($.global.TEXT_WRAP_TEST) {
-        $.global.TEXT_WRAP_API = { install: install, uninstall: uninstall, status: status, createDemo: createDemo, helperNames: helperNames, textDoc: textDoc, buildUI: buildUI, savedLayers: savedLayers };
+        $.global.TEXT_WRAP_API = { install: install, uninstall: uninstall, status: status, createDemo: createDemo, helperNames: helperNames, textDoc: textDoc, buildUI: buildUI, savedLayers: savedLayers, isInstalled: isInstalled, blockFrame: blockFrame };
         return;
     }
     var ui = buildUI(thisObj);
