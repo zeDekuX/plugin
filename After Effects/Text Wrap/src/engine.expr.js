@@ -79,6 +79,9 @@ function addBounds(region, layer) {
     if (r.height > PARKED_LIMIT || r.width > PARKED_LIMIT) return;
     polygon(region, mapper(layer, []), [[l, t], [R, t], [R, B], [l, B]]);
 }
+// A shape the viewer cannot see must not push the text: an element waiting for its
+// entrance often sits at opacity 0 in the middle of the block.
+function visible(layer) { return time >= layer.inPoint && time < layer.outPoint && layer.opacity.value > 0; }
 function inRegion(region, x, y) {
     var inside = false;
     region.edges.forEach(function (e) {
@@ -110,9 +113,16 @@ function layout() {
         bounds.right = Math.max(bounds.right, flat.bounds.right);
     });
     if (!isFinite(bounds.top)) throw new Error('area mancante o vuota: premi Applica / Aggiorna wrap.');
-    // A shape scaled to nothing or an invalid path must not stop the whole layout.
+    // A hidden shape, one scaled to nothing or an invalid path must not affect the
+    // layout. A point would still cut a notch as wide as the padding.
     EXCLUSIONS = EXCLUSIONS.filter(function (region) {
-        try { region.edges = TextAreaCore.flatten(region.data, tolerance).edges; } catch (e) { return false; }
+        var flat;
+        try {
+            if (!visible(region.layer)) return false;
+            flat = TextAreaCore.flatten(region.data, tolerance);
+        } catch (e) { return false; }
+        if (!(flat.bounds.right - flat.bounds.left > 0.01 && flat.bounds.top - flat.bounds.bottom > 0.01)) return false;
+        region.edges = flat.edges;
         holeEdges = holeEdges.concat(region.edges);
         return true;
     });

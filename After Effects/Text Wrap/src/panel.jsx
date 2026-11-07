@@ -117,7 +117,7 @@
     function regionCode(layer, listName, index, control) {
         var v = listName + index, ref = v + 'Layer', lines = [];
         lines.push('var ' + ref + ' = thisLayer.effect(' + quote(control) + ')(1);');
-        lines.push('var ' + v + ' = { data: [] };');
+        lines.push('var ' + v + ' = { data: [], layer: ' + ref + ' };');
         function emit(fn, chain, target) { lines.push(fn + '(' + v + ', ' + ref + ', [' + chain.join(', ') + '], ' + target + ');'); }
         var found = 0;
         if (layer instanceof ShapeLayer) found = walkShapes(layer.property('ADBE Root Vectors Group'), ref, [], emit);
@@ -526,7 +526,7 @@
         win.alignChildren = ['fill', 'top'];
         win.spacing = 8;
         win.margins = 12;
-        var area = [], exclusions = [], loadedFor = null;
+        var area = [], exclusions = [], dropped = [], loadedFor = null;
 
         var areaGroup = win.add('panel', undefined, 'Area (dove scorre il testo)');
         areaGroup.alignChildren = ['fill', 'top'];
@@ -590,18 +590,26 @@
             refresh();
         };
         exRemove.onClick = function () {
-            if (exList.selection) { exclusions.splice(exList.selection.index, 1); refresh(); }
+            if (exList.selection) { dropped.push(exclusions[exList.selection.index]); exclusions.splice(exList.selection.index, 1); refresh(); }
         };
         // Every selected text gets its own wrap around the selected shapes. A text
-        // listed by hand as area or exclusion stays what the list says it is.
+        // listed by hand as area or exclusion stays what the list says it is. New
+        // shapes join the saved ones: only a list opened with Carica can take one
+        // away, since it is the only one that shows them.
         function setupFor(comp, text, single, all) {
+            var saved = savedLayers(comp, text), loaded = loadedFor === text.id, i;
             var useArea = single ? area : [], useExclusions = exclusions.slice(0);
-            if (loadedFor === text.id) return { area: useArea, exclusions: useExclusions };
-            var saved = savedLayers(comp, text);
-            if (!useArea.length) useArea = saved.area;
-            if (!useExclusions.length) useExclusions = saved.exclusions;
-            for (var i = 0; i < all.length; i++) if (!isText(all[i]) && !contains(useArea, all[i]) && !contains(useExclusions, all[i])) useExclusions.push(all[i]);
+            function addShape(layer) { if (!contains(useArea, layer) && !contains(useExclusions, layer) && !contains(dropped, layer)) useExclusions.push(layer); }
+            if (!useArea.length && !(loaded && single)) useArea = saved.area;
+            if (!loaded) for (i = 0; i < saved.exclusions.length; i++) addShape(saved.exclusions[i]);
+            for (i = 0; i < all.length; i++) if (!isText(all[i])) addShape(all[i]);
             return { area: useArea, exclusions: useExclusions };
+        }
+        // After Apply the list is empty: this is the only sign of what was linked.
+        function wrapped(comp, text) {
+            var names = [], list = savedLayers(comp, text).exclusions;
+            for (var i = 0; i < list.length; i++) names.push(list[i].name);
+            return names.length ? ' - Contorna: ' + names.join(', ') : ' - Nessuna forma da contornare';
         }
         apply.onClick = function () {
             var comp = needComp(); if (!comp) return;
@@ -624,9 +632,10 @@
                 notices = null;
                 area = [];
                 exclusions = [];
+                dropped = [];
                 loadedFor = null;
                 refresh();
-                statusLabel.text = targets.length > 1 ? (targets.length - failed.length) + ' blocchi su ' + targets.length + ' aggiornati.' : (result ? status(result) : 'Wrap non applicato.');
+                statusLabel.text = (targets.length > 1 ? (targets.length - failed.length) + ' blocchi su ' + targets.length + ' aggiornati' : (result ? status(result) : 'Wrap non applicato.')) + (result ? wrapped(comp, result) : '');
                 if (messages.length) alert(messages.join('\n\n'));
             });
         };
@@ -637,6 +646,7 @@
             var saved = savedLayers(comp, text);
             area = saved.area;
             exclusions = saved.exclusions;
+            dropped = [];
             loadedFor = text.id;
             refresh();
             statusLabel.text = status(text);

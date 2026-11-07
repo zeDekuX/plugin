@@ -27,9 +27,9 @@ Ogni blocco ha il proprio wrap e resta dov'è, con il suo allineamento, le sue r
 | Pulsante | Funzione |
 |---|---|
 | Usa selezione (Area) | Usa i livelli selezionati come zona in cui scorre il testo |
-| Aggiungi selezione (Esclusioni) | Aggiunge i livelli selezionati alle forme da contornare |
-| Applica / Aggiorna wrap | Installa o aggiorna il wrap su tutti i testi selezionati. Gli altri livelli selezionati diventano nuove esclusioni |
-| Carica | Mostra area, esclusioni e stato del testo selezionato, per modificarli |
+| Aggiungi selezione (Esclusioni) | Aggiunge i livelli selezionati alle forme da contornare, senza togliere quelle già collegate |
+| Applica / Aggiorna wrap | Installa o aggiorna il wrap su tutti i testi selezionati. Gli altri livelli selezionati diventano nuove esclusioni. La riga di stato elenca le forme contornate |
+| Carica | Mostra area, esclusioni e stato del testo selezionato, per modificarli. Per togliere una forma: Carica, Rimuovi, Applica |
 | Rimuovi wrap | Rimette i blocchi selezionati come erano: toglie il wrap, ripristina l'allineamento e riattiva il testo in box originale |
 | Crea demo | Crea una composizione di esempio |
 
@@ -50,6 +50,7 @@ Testo, font, corpo, tracking e interlinea si modificano sul livello di testo e i
 - Le parole non vengono mai spezzate e il corpo non viene mai ridotto. Le parole unite da spazio unificatore restano insieme.
 - Le righe si leggono da sinistra a destra attraverso tutti i segmenti, poi si passa alla riga sotto. Con due colonne il testo legge quindi attraverso entrambe, come nell'originale Cavalry.
 - Le parole che non entrano vengono nascoste. **Carica** mostra quante sono e qual è la prima.
+- Una forma che non si vede non sposta il testo: opacità del livello a 0, scala a 0, oppure prima del punto di attacco o dopo quello di stacco. Il wrap segue i keyframe di opacità, quindi una forma che entra in scena inizia a spingere il testo quando appare. Per un ostacolo invisibile, spegni l'occhio del livello invece di portare l'opacità a 0.
 
 ## Forme supportate
 

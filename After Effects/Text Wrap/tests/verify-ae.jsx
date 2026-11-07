@@ -198,9 +198,9 @@
     // Blocks: what the user sees must not change when a wrap is applied.
     function panelFor(c) {
         c.openInViewer();
-        var w = API.buildUI(null), buttons = {};
-        (function find(g) { for (var i = 0; i < g.children.length; i++) { var k = g.children[i]; if (k.type === 'button') buttons[k.text] = k; if (k.children && k.children.length) find(k); } })(w);
-        return { window: w, click: function (name, layers) {
+        var w = API.buildUI(null), buttons = {}, list = null, label = null;
+        (function find(g) { for (var i = 0; i < g.children.length; i++) { var k = g.children[i]; if (k.type === 'button') buttons[k.text] = k; if (k.type === 'listbox') list = k; if (k.type === 'statictext') label = k; if (k.children && k.children.length) find(k); } })(w);
+        return { window: w, list: function () { return list; }, statusText: function () { return label.text; }, click: function (name, layers) {
             for (var i = 1; i <= c.numLayers; i++) c.layer(i).selected = false;
             for (var n = 0; n < layers.length; n++) layers[n].selected = true;
             buttons[name].notify('onClick');
@@ -217,6 +217,7 @@
     function rectOf(t) { var r = t.sourceRectAtTime(0, false); return [r.left, r.top, r.width, r.height]; }
     function sameRect(a, b, what) { for (var i = 0; i < 4; i++) need(Math.abs(a[i] - b[i]) <= 1.5, what + ': ' + a.join(',') + ' -> ' + b.join(',')); }
     function layout(c, t) { return doc(c.layer(API.helperNames(t).engine)).valueAtTime(0, false).text; }
+    function layoutAt(c, t, at) { return doc(c.layer(API.helperNames(t).engine)).valueAtTime(at, false).text; }
     function clean(c, t) { var e = errs(c, t); need(!e, e); }
     step('two blocks through the panel', function () {
         var c = comp('two'), a = box(c, 'A', [420, 560], [260, 350]), b = box(c, 'B', [420, 560], [740, 350]), e = shape(c, 'E', 'ellipse', [240, 240]); pos(e, [500, 350]);
@@ -419,6 +420,56 @@
         o.push('removed: leftover TW layers ' + left + ', animators ' + t.property('ADBE Text Properties').property('ADBE Text Animators').numProperties + ', fx ' + t.property('ADBE Effect Parade').numProperties);
         w.close();
         return o.join(' | ');
+    });
+    step('panel keeps saved shapes', function () {
+        var c = comp('keep'), t = text(c, lorem), a = shape(c, 'A', 'ellipse', [120, 120]), b = shape(c, 'B', 'ellipse', [120, 120]), d = shape(c, 'D', 'ellipse', [120, 120]);
+        pos(a, [300, 200]); pos(b, [500, 350]); pos(d, [700, 450]);
+        function names() { var o = [], l = API.savedLayers(c, c.layer('T')).exclusions; for (var i = 0; i < l.length; i++) o.push(l[i].name); return o.sort().join(''); }
+        var p = panelFor(c);
+        p.click('Applica / Aggiorna wrap', [t, a]);
+        need(names() === 'A', 'first shape linked');
+        p.click('Aggiungi selezione', [b]);
+        p.click('Applica / Aggiorna wrap', [c.layer('T')]);
+        need(names() === 'AB', 'a shape added to the list keeps the saved one: ' + names());
+        p.click('Carica', [c.layer('T')]);
+        p.click('Applica / Aggiorna wrap', [c.layer('T'), d]);
+        need(names() === 'ABD', 'a shape selected after Carica is added: ' + names());
+        p.click('Applica / Aggiorna wrap', [c.layer('T'), a, d]);
+        need(names() === 'ABD', 'no doubles: ' + names());
+        p.click('Carica', [c.layer('T')]);
+        p.list().selection = 0;
+        var gone = p.list().selection.text;
+        p.click('Rimuovi', [c.layer('T'), c.layer(gone)]);
+        p.click('Applica / Aggiorna wrap', [c.layer('T'), c.layer(gone)]);
+        need(names().indexOf(gone) < 0 && names().length === 2, 'a shape taken off the list stays off: ' + names());
+        need(p.statusText().indexOf('Contorna: ') > 0, 'status names the shapes: ' + p.statusText());
+        p.window.close();
+        return names() + ' / ' + p.statusText();
+    });
+    step('hidden shapes do not push the text', function () {
+        var c = comp('hidden'), t = text(c, lorem), e = shape(c, 'E', 'ellipse', [240, 240]), box = area(c); pos(e, [500, 350]);
+        API.install(c, t, [box], []);
+        var alone = layout(c, t);
+        API.install(c, t, [box], [e]);
+        var op = e.property('ADBE Transform Group').property('ADBE Opacity'), sc = e.property('ADBE Transform Group').property('ADBE Scale');
+        var shown = layout(c, t);
+        need(shown !== alone, 'a visible shape pushes the text');
+        op.setValue(0); need(layout(c, t) === alone, 'opacity 0');
+        op.setValue(1); need(layout(c, t) === shown, 'any opacity above 0 counts');
+        op.setValue(100);
+        sc.setValue([0, 0]); need(layout(c, t) === alone, 'scale 0 leaves no notch');
+        sc.setValue([100, 100]);
+        e.inPoint = 2;
+        need(layoutAt(c, t, 1) === alone, 'before its in point');
+        need(layoutAt(c, t, 2) === shown, 'from its in point');
+        e.inPoint = 0; e.outPoint = 1;
+        need(layoutAt(c, t, 0.5) === shown, 'before its out point');
+        need(layoutAt(c, t, 2) === alone, 'after its out point');
+        e.outPoint = 4;
+        op.setValueAtTime(0, 0); op.setValueAtTime(2, 100);
+        need(layoutAt(c, t, 0) === alone, 'keyframed: hidden');
+        need(layoutAt(c, t, 2) === shown, 'keyframed: shown');
+        return 'ok' + errs(c, t);
     });
     step('alerts raised', function () { return alerts.length ? alerts.join(' ; ') : 'none'; });
     L('RENDERS-QUEUED');
