@@ -28,7 +28,7 @@ Ogni blocco ha il proprio wrap e resta dov'è, con il suo allineamento, le sue r
 |---|---|
 | Usa selezione (Area) | Usa i livelli selezionati come zona in cui scorre il testo |
 | Aggiungi selezione (Esclusioni) | Aggiunge i livelli selezionati alle forme da contornare, senza togliere quelle già collegate |
-| Applica / Aggiorna wrap | Installa o aggiorna il wrap su tutti i testi selezionati. Gli altri livelli selezionati diventano nuove esclusioni. La riga di stato elenca le forme contornate |
+| Applica / Aggiorna wrap | Installa o aggiorna il wrap su tutti i testi selezionati. Gli altri livelli selezionati diventano nuove esclusioni. La riga di stato elenca le forme contornate. Se non trova un testo, l'avviso dice perché: niente selezionato, nessun livello di testo tra quelli selezionati (per esempio se è in una precomposizione) |
 | Carica | Mostra area, esclusioni e stato del testo selezionato, per modificarli. Per togliere una forma: Carica, Rimuovi, Applica |
 | Rimuovi wrap | Rimette i blocchi selezionati come erano: toglie il wrap, ripristina l'allineamento e riattiva il testo in box originale |
 | Crea demo | Crea una composizione di esempio |
@@ -62,7 +62,7 @@ Tracciati, ellissi, rettangoli (anche arrotondati), stelle e poligoni dei livell
 - Serve testo a stile unico. Stili diversi su singole parole non vengono misurati.
 - Il testo in box viene convertito: AE non permette di farlo sul livello esistente, quindi Text Wrap crea un nuovo livello di testo e disattiva l'originale, rinominandolo `(box originale)`. Stile, trasformazioni con i loro keyframe, parent e tempi vengono copiati. Effetti e maschere del livello no: il pannello lo segnala. **Rimuovi wrap** riporta il livello originale.
 - Se duplichi un blocco con il wrap, premi **Applica / Aggiorna wrap** sul duplicato: prima di allora legge ancora la disposizione dell'originale.
-- Per usare un blocco come ostacolo di un altro, aggiungilo alle esclusioni: se ha un wrap conta il suo rettangolo `TW Area`, se non ce l'ha conta il suo ingombro.
+- Per usare un blocco con wrap come ostacolo di un altro, aggiungi alle esclusioni il suo rettangolo `TW Area`. Area ed Esclusioni non accettano livelli di testo: se ne selezioni uno, il pannello lo spiega.
 - Se dopo una modifica al testo **Carica** mostra `Testo cambiato`, premi di nuovo **Applica / Aggiorna wrap**.
 - Dopo aver modificato testo o stile, premi **Applica / Aggiorna wrap** prima di trascinare le forme: il wrap si aggiorna comunque, ma finché non lo fai ogni spostamento rimisura tutte le parole e il trascinamento è lento.
 - Ridimensionamento orizzontale e verticale dei caratteri non vengono rilevati da soli: dopo averli cambiati premi **Applica / Aggiorna wrap**. Lo stesso vale per lo spazio prima e dopo i paragrafi e per i rientri, che il wrap non legge: usa **TW Spazio paragrafi**.

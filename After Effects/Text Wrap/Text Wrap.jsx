@@ -580,21 +580,40 @@
         }
         function selectedText(comp) { return selectedTexts(comp)[0] || null; }
         function contains(list, layer) { for (var i = 0; i < list.length; i++) if (list[i] === layer) return true; return false; }
+        var TEXT_NOT_SHAPE = 'Un livello di testo non va qui. ', HOW = '\r\rPer applicare il wrap: seleziona nella timeline il testo e le forme da contornare, poi premi Applica / Aggiorna wrap.';
+        // Apply found no text to wrap: say which of the usual causes it is.
+        function whyNoText(comp, picked) {
+            var selected = comp.selectedLayers, names = [];
+            if (!selected.length) return 'Nessun livello selezionato nella composizione "' + comp.name + '".' + HOW;
+            if (!picked.length) {
+                for (var i = 0; i < selected.length && i < 3; i++) names.push('"' + selected[i].name + '"');
+                return 'Nessun livello di testo tra quelli selezionati in "' + comp.name + '" (' + names.join(', ') + (selected.length > 3 ? '...' : '') + ').'
+                    + " Se il testo \u00e8 dentro una precomposizione, apri la precomposizione. Un testo convertito in forme non \u00e8 pi\u00f9 un livello di testo." + HOW;
+            }
+            for (var t = 0; t < picked.length; t++) names.push('"' + picked[t].name + '"');
+            return 'Il testo ' + names.join(', ') + " \u00e8 nella lista Esclusioni o \u00e8 l'Area del pannello, quindi non viene trattato come testo da contornare. Chiudi e riapri il pannello per svuotare le liste." + HOW;
+        }
         function needComp() { var c = activeComp(); if (!c) alert('Apri una composizione.'); return c; }
 
         areaSet.onClick = function () {
             var comp = needComp(); if (!comp) return;
-            var chosen = [], text = selectedText(comp), all = shapesInSelection(comp);
-            for (var i = 0; i < all.length; i++) if (all[i] !== text || all.length === 1) chosen.push(all[i]);
-            if (!chosen.length) { alert('Seleziona la forma da usare come area.'); return; }
+            var chosen = [], all = shapesInSelection(comp);
+            for (var i = 0; i < all.length; i++) if (!isText(all[i])) chosen.push(all[i]);
+            if (!chosen.length) { alert(all.length ? TEXT_NOT_SHAPE + "L'area \u00e8 la forma dentro cui scorre il testo: seleziona quella forma e premi Usa selezione. Se non ti serve, lascia Automatica." : 'Seleziona la forma da usare come area.'); return; }
             area = chosen;
             refresh();
         };
         areaClear.onClick = function () { area = []; refresh(); };
         exAdd.onClick = function () {
             var comp = needComp(); if (!comp) return;
-            var all = shapesInSelection(comp), text = selectedText(comp);
-            for (var i = 0; i < all.length; i++) if (all[i] !== text && !contains(exclusions, all[i])) exclusions.push(all[i]);
+            var all = shapesInSelection(comp), shapes = 0;
+            for (var i = 0; i < all.length; i++) {
+                if (isText(all[i])) continue;
+                shapes++;
+                if (!contains(exclusions, all[i])) exclusions.push(all[i]);
+            }
+            if (!all.length) alert('Seleziona le forme da contornare.');
+            else if (!shapes) alert(TEXT_NOT_SHAPE + 'Qui vanno le forme da contornare. Per usare un altro blocco con wrap come ostacolo, aggiungi il suo rettangolo TW Area.');
             refresh();
         };
         exRemove.onClick = function () {
@@ -624,7 +643,7 @@
             // Read once: installing a wrap adds layers and changes the selection.
             var picked = selectedTexts(comp), selection = shapesInSelection(comp), targets = [];
             for (var i = 0; i < picked.length; i++) if (!contains(exclusions, picked[i]) && (picked.length === 1 || !contains(area, picked[i]))) targets.push(picked[i]);
-            if (!targets.length) { alert('Seleziona un livello di testo.'); return; }
+            if (!targets.length) { alert(whyNoText(comp, picked)); return; }
             if (!checkEngine()) return;
             guarded('Applica', function () {
                 var failed = [], result = null;

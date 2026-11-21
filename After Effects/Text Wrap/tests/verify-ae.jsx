@@ -421,6 +421,25 @@
         w.close();
         return o.join(' | ');
     });
+    step('panel rejects text in the lists', function () {
+        var c = comp('reject'), t = text(c, lorem), e = shape(c, 'E', 'ellipse', [200, 200]), p = panelFor(c), o = [];
+        alerts.length = 0;
+        p.click('Aggiungi selezione', [t]);
+        need(p.list().items.length === 0 && alerts.length === 1 && alerts[0].indexOf('testo non va qui') > 0, 'text kept out of exclusions: ' + alerts.join(' / '));
+        p.click('Aggiungi selezione', [t, e]);
+        need(p.list().items.length === 1 && p.list().items[0].text === 'E' && alerts.length === 1, 'shape added, text skipped');
+        p.click('Usa selezione', [t]);
+        need(alerts.length === 2 && alerts[1].indexOf('testo non va qui') > 0, 'text kept out of area');
+        p.click('Applica / Aggiorna wrap', []);
+        need(alerts.length === 3 && alerts[2].indexOf('Nessun livello selezionato') === 0, 'nothing selected: ' + alerts[2]);
+        p.click('Applica / Aggiorna wrap', [e]);
+        need(alerts.length === 4 && alerts[3].indexOf('Nessun livello di testo') === 0 && alerts[3].indexOf('"E"') > 0, 'no text: ' + alerts[3]);
+        p.click('Applica / Aggiorna wrap', [t, e]);
+        need(alerts.length === 4 && API.savedLayers(c, c.layer('T')).exclusions[0] === e, 'apply still works');
+        p.click('Rimuovi wrap', [c.layer('T')]);
+        p.window.close();
+        return alerts[3];
+    });
     step('panel keeps saved shapes', function () {
         var c = comp('keep'), t = text(c, lorem), a = shape(c, 'A', 'ellipse', [120, 120]), b = shape(c, 'B', 'ellipse', [120, 120]), d = shape(c, 'D', 'ellipse', [120, 120]);
         pos(a, [300, 200]); pos(b, [500, 350]); pos(d, [700, 450]);
